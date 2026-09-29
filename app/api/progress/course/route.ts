@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getCurrentUser, awardXP, checkAchievements } from "@/lib/user"
+import { getCurrentUser, awardXP, revokeXP, lockUser, checkAchievements } from "@/lib/user"
 import { isDemoUser } from "@/lib/demo"
 import { XP_VALUES } from "@/lib/xp"
 
@@ -59,11 +59,14 @@ export async function POST(req: NextRequest) {
     }
 
     const { updated, justCompleted } = await prisma.$transaction(async (tx) => {
+      await lockUser(tx, user.id)
+
       const course = await tx.externalCourse.findUnique({ where: { id } })
       if (!course || course.userId !== user.id) return { updated: null, justCompleted: false }
 
       const isNowCompleted = course.totalLessons > 0 && completedLessons >= course.totalLessons
-      const wasCompleted = course.isCompleted
+      // completedAt survives un-completing, so completion XP is paid exactly once
+      const wasCompleted = course.isCompleted || course.completedAt !== null
 
       const updated = await tx.externalCourse.update({
         where: { id },
@@ -93,11 +96,22 @@ export async function POST(req: NextRequest) {
 
   if (action === "delete") {
     const { id } = data
-    const course = await prisma.externalCourse.findUnique({ where: { id } })
-    if (!course || course.userId !== user.id) {
+    const deleted = await prisma.$transaction(async (tx) => {
+      await lockUser(tx, user.id)
+
+      const course = await tx.externalCourse.findUnique({ where: { id } })
+      if (!course || course.userId !== user.id) return false
+
+      // Take back the XP this course earned, otherwise add → delete → add farms XP
+      if (course.xpEarned > 0) {
+        await revokeXP(user.id, course.xpEarned, { db: tx })
+      }
+      await tx.externalCourse.delete({ where: { id } })
+      return true
+    })
+    if (!deleted) {
       return NextResponse.json({ error: "Not found" }, { status: 404 })
     }
-    await prisma.externalCourse.delete({ where: { id } })
     return NextResponse.json({ success: true })
   }
 

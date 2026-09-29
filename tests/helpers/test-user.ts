@@ -17,6 +17,10 @@ export async function resetTestUser(id: string) {
   await prisma.externalCourse.deleteMany({ where: { userId: id } })
   await prisma.monthlyProject.deleteMany({ where: { userId: id } })
   await prisma.subscription.deleteMany({ where: { userId: id } })
+  await prisma.quizAttempt.deleteMany({ where: { userId: id } })
+  await prisma.githubEvent.deleteMany({ where: { userId: id } })
+  await prisma.aiRecommendation.deleteMany({ where: { userId: id } })
+  await prisma.accountabilityPair.deleteMany({ where: { OR: [{ requesterId: id }, { partnerId: id }] } })
   // Reset mutable user fields to baseline
   await prisma.user.update({
     where: { id },

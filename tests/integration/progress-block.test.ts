@@ -77,6 +77,52 @@ describe("POST /api/progress/block", () => {
     expect(body.xpAwarded).toBe(1)
   })
 
+  it("awards SKIP_BLOCK XP only once when skipping repeatedly", async () => {
+    await POST(makePost("/api/progress/block", { blockId: BLOCK, status: "SKIPPED" }))
+    const res = await POST(makePost("/api/progress/block", { blockId: BLOCK, status: "SKIPPED" }))
+    const body = await res.json()
+    expect(body.xpAwarded).toBe(0)
+    const user = await prisma.user.findUnique({ where: { id: ID } })
+    expect(user!.totalXP).toBe(1)
+  })
+
+  it("still awards completion XP after a block was skipped", async () => {
+    await POST(makePost("/api/progress/block", { blockId: BLOCK, status: "SKIPPED" }))
+    const res = await POST(makePost("/api/progress/block", { blockId: BLOCK, status: "COMPLETED" }))
+    const body = await res.json()
+    expect(body.xpAwarded).toBe(10)
+    const bp = await prisma.blockProgress.findUnique({
+      where: { userId_blockId: { userId: ID, blockId: BLOCK } },
+    })
+    expect(bp!.xpEarned).toBe(11) // skip + completion, accumulated
+  })
+
+  it("does NOT re-award XP or goal progress for complete → skip → complete", async () => {
+    await POST(makePost("/api/progress/block", { blockId: BLOCK, status: "COMPLETED" }))
+    const skip = await POST(makePost("/api/progress/block", { blockId: BLOCK, status: "SKIPPED" }))
+    expect((await skip.json()).xpAwarded).toBe(0)
+    const again = await POST(makePost("/api/progress/block", { blockId: BLOCK, status: "COMPLETED" }))
+    expect((await again.json()).xpAwarded).toBe(0)
+
+    const user = await prisma.user.findUnique({ where: { id: ID } })
+    expect(user!.totalXP).toBe(20) // 10 (block) + 10 (first_block achievement), once
+    const logs = await prisma.dailyLog.findMany({ where: { userId: ID } })
+    expect(logs.reduce((sum, l) => sum + l.blocksCompleted, 0)).toBe(1)
+  })
+
+  it("does NOT double-award XP for concurrent completions of the same block", async () => {
+    const results = await Promise.all([
+      POST(makePost("/api/progress/block", { blockId: BLOCK, status: "COMPLETED" })),
+      POST(makePost("/api/progress/block", { blockId: BLOCK, status: "COMPLETED" })),
+      POST(makePost("/api/progress/block", { blockId: BLOCK, status: "COMPLETED" })),
+    ])
+    const awarded = await Promise.all(results.map(async (r) => (await r.json()).xpAwarded))
+    expect(awarded.filter((xp) => xp > 0)).toHaveLength(1)
+
+    const user = await prisma.user.findUnique({ where: { id: ID } })
+    expect(user!.totalXP).toBe(20) // 10 (block) + 10 (first_block achievement)
+  })
+
   it("sanitizes negative minutesSpent to 0", async () => {
     await POST(makePost("/api/progress/block", { blockId: BLOCK, status: "COMPLETED", minutesSpent: -99 }))
     const bp = await prisma.blockProgress.findUnique({

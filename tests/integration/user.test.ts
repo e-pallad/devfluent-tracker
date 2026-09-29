@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest"
 import { prisma } from "@/lib/prisma"
-import { awardXP, awardDailyLoginXP, updateStreak, checkAchievements } from "@/lib/user"
+import { awardXP, revokeXP, awardDailyLoginXP, updateStreak, checkAchievements } from "@/lib/user"
 import { createTestUser, resetTestUser, deleteTestUser } from "../helpers/test-user"
 
 const ID = "test-user-helpers"
@@ -61,6 +61,32 @@ describe("lib/user.ts helpers", () => {
       expect(result.newXP).toBe(25)
       const user = await prisma.user.findUnique({ where: { id: ID } })
       expect(user!.totalXP).toBe(25)
+    })
+
+    it("does not lose XP under concurrent awards", async () => {
+      await Promise.all(Array.from({ length: 10 }, () => awardXP(ID, 20)))
+      const user = await prisma.user.findUnique({ where: { id: ID } })
+      expect(user!.totalXP).toBe(200)
+      expect(user!.level).toBe(2)
+    })
+  })
+
+  // ─── revokeXP ──────────────────────────────────────────────────────────────
+
+  describe("revokeXP", () => {
+    it("subtracts XP and recalculates level", async () => {
+      await awardXP(ID, 200) // level 2
+      const result = await revokeXP(ID, 100)
+      expect(result).toEqual({ newXP: 100, newLevel: 1 })
+      const user = await prisma.user.findUnique({ where: { id: ID } })
+      expect(user!.totalXP).toBe(100)
+      expect(user!.level).toBe(1)
+    })
+
+    it("clamps at zero", async () => {
+      await awardXP(ID, 30)
+      const result = await revokeXP(ID, 100)
+      expect(result.newXP).toBe(0)
     })
   })
 
@@ -160,6 +186,16 @@ describe("lib/user.ts helpers", () => {
       await checkAchievements(ID)
       const records = await prisma.achievement.findMany({ where: { userId: ID, slug: "first_block" } })
       expect(records).toHaveLength(1)
+    })
+
+    it("awards an achievement's XP bonus once under concurrent calls", async () => {
+      await prisma.blockProgress.create({
+        data: { userId: ID, blockId: "m1w1-b1", month: 1, week: 1, status: "COMPLETED", xpEarned: 10 },
+      })
+      const results = await Promise.all([checkAchievements(ID), checkAchievements(ID), checkAchievements(ID)])
+      expect(results.flat().filter((a) => a.slug === "first_block")).toHaveLength(1)
+      const user = await prisma.user.findUnique({ where: { id: ID } })
+      expect(user!.totalXP).toBe(10) // first_block bonus, once
     })
   })
 })

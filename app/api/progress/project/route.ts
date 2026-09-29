@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getCurrentUser, awardXP, checkAchievements } from "@/lib/user"
+import { getCurrentUser, awardXP, lockUser, checkAchievements } from "@/lib/user"
 import { isDemoUser } from "@/lib/demo"
 import { XP_VALUES } from "@/lib/xp"
 import { getTrackById, CURRICULUM } from "@/content/curriculum"
@@ -41,6 +41,14 @@ export async function POST(req: NextRequest) {
   const track = user.track
 
   if (action === "start") {
+    const existing = await prisma.monthlyProject.findUnique({
+      where: { userId_track_month: { userId: user.id, track, month } },
+    })
+    // Starting again must not reopen a finished project
+    if (existing?.status === "COMPLETED") {
+      return NextResponse.json({ success: true, project: existing })
+    }
+
     const project = await prisma.monthlyProject.upsert({
       where: { userId_track_month: { userId: user.id, track, month } },
       create: {
@@ -60,10 +68,13 @@ export async function POST(req: NextRequest) {
 
   if (action === "complete") {
     const { project, leveledUp, newLevel, justCompleted } = await prisma.$transaction(async (tx) => {
+      await lockUser(tx, user.id)
+
       const existing = await tx.monthlyProject.findUnique({
         where: { userId_track_month: { userId: user.id, track, month } },
       })
-      const wasCompleted = existing?.status === "COMPLETED"
+      // completedAt is kept once set, so completion XP is paid exactly once
+      const wasCompleted = Boolean(existing?.completedAt)
 
       const project = await tx.monthlyProject.upsert({
         where: { userId_track_month: { userId: user.id, track, month } },
@@ -83,8 +94,7 @@ export async function POST(req: NextRequest) {
           status: "COMPLETED",
           repoUrl: repoUrl || null,
           liveUrl: liveUrl || null,
-          completedAt: new Date(),
-          ...(!wasCompleted ? { xpEarned: XP_VALUES.COMPLETE_PROJECT } : {}),
+          ...(!wasCompleted ? { completedAt: new Date(), xpEarned: XP_VALUES.COMPLETE_PROJECT } : {}),
         },
       })
 
