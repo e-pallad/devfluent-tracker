@@ -1,4 +1,4 @@
-import type { Metadata } from "next"
+import type { Metadata, Viewport } from "next"
 import { Geist, Geist_Mono } from "next/font/google"
 import { Toaster } from "sonner"
 import { ThemeProvider } from "@/components/theme-provider"
@@ -19,7 +19,6 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   metadataBase: new URL("https://devfluent.de"),
   title: "Devfluent",
-  themeColor: "#4f46e5",
   description: "ADHD-friendly developer learning tracker — roadmaps, curriculum, and gamified progress",
   manifest: "/manifest.webmanifest",
   openGraph: {
@@ -38,6 +37,11 @@ export const metadata: Metadata = {
     statusBarStyle: "default",
     title: "Devfluent",
   },
+}
+
+// themeColor belongs in the viewport export since Next.js 14
+export const viewport: Viewport = {
+  themeColor: "#4f46e5",
 }
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {

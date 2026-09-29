@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { readJson, INVALID_JSON } from "@/lib/http"
 import { getCurrentUser, awardXP, lockUser, updateStreak, checkAchievements } from "@/lib/user"
 import { getBlock } from "@/content/curriculum"
 import { XP_VALUES } from "@/lib/xp"
@@ -12,11 +13,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Demo mode is read-only" }, { status: 403 })
   }
 
-  const body = await req.json()
+  const body = await readJson(req)
+  if (!body) return NextResponse.json(INVALID_JSON, { status: 400 })
   const { blockId, status, minutesSpent, usedTimer } = body
 
   if (!blockId || !status) {
     return NextResponse.json({ error: "Missing required fields: blockId and status are required" }, { status: 400 })
+  }
+  if (typeof blockId !== "string") {
+    return NextResponse.json({ error: "blockId must be a string" }, { status: 400 })
   }
 
   const validStatuses = ["COMPLETED", "SKIPPED", "IN_PROGRESS"]
@@ -114,12 +119,15 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: "Demo mode is read-only" }, { status: 403 })
   }
 
-  const body = await req.json()
+  const body = await readJson(req)
+  if (!body) return NextResponse.json(INVALID_JSON, { status: 400 })
   const { blockId, notes } = body
 
-  if (!blockId || typeof notes !== "string") {
+  if (!blockId || typeof blockId !== "string" || typeof notes !== "string") {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 })
   }
+  // Notes only attach to real curriculum blocks
+  if (!getBlock(blockId)) return NextResponse.json({ error: "Block not found" }, { status: 404 })
 
   const safeNotes = notes.slice(0, 5000)
 

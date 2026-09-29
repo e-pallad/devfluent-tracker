@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { readJson, INVALID_JSON } from "@/lib/http"
 import { getCurrentUser } from "@/lib/user"
 import { getUserTier, isFeatureAvailable } from "@/lib/subscription"
 
@@ -20,7 +21,9 @@ export async function POST(req: NextRequest) {
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   if (!(await hasAccess(user.id))) return NextResponse.json(PRO_REQUIRED, { status: 403 })
 
-  const { partnerEmail } = await req.json() as { partnerEmail?: string }
+  const body = await readJson(req)
+  if (!body) return NextResponse.json(INVALID_JSON, { status: 400 })
+  const { partnerEmail } = body
   if (!partnerEmail || typeof partnerEmail !== "string" || partnerEmail.length > 254) {
     return NextResponse.json({ error: "partnerEmail required" }, { status: 400 })
   }

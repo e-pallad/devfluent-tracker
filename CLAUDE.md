@@ -77,6 +77,7 @@ Rules:
 | `STRIPE_PRICE_MONTHLY_ID` | Stripe Price ID for monthly Pro plan (`price_…`) |
 | `STRIPE_PRICE_ANNUAL_ID` | Stripe Price ID for annual Pro plan (`price_…`) |
 | `STRIPE_PRICE_LIFETIME_ID` | Stripe Price ID for lifetime plan (optional one-time purchase) |
+| `ENCRYPTION_KEY` | Optional, 64 hex chars — AES-256-GCM encryption of stored GitHub tokens (`lib/encryption.ts`); legacy plaintext tokens still work |
 
 ---
 
@@ -125,7 +126,8 @@ Route groups under `app/`:
 
 Key library files:
 - `lib/prisma.ts` — PrismaClient singleton (uses `@prisma/adapter-pg`)
-- `lib/user.ts` — `getCurrentUser`, `awardXP`, `updateStreak`, `checkAchievements`
+- `lib/user.ts` — `getCurrentUser`, `awardXP`, `revokeXP`, `lockUser`, `updateStreak`, `checkAchievements`
+- `lib/http.ts` — `readJson(req)` (null on malformed body → routes return 400)
 - `lib/xp.ts` — XP values, level thresholds, achievement definitions (single source of truth)
 - `lib/roadmap.ts` — roadmap.sh API integration with 24-hour cache + local JSON fallback
 - `lib/supabase/server.ts` / `client.ts` — Supabase SSR/client helpers
@@ -155,8 +157,8 @@ Generated code: `app/generated/prisma/` — **never edit directly.**
 
 | Route | Purpose |
 |---|---|
-| `api/ai/recommendations` | AI coach — personalised suggestions via `claude-haiku-4-5-20251001`, cached 24h in `AiRecommendation` |
-| `api/accountability` | Link/unlink accountability partner by email |
+| `api/ai/recommendations` | AI coach (Pro-only, 403 otherwise) — personalised suggestions via `claude-haiku-4-5-20251001`, cached 24h in `AiRecommendation`; failed regeneration serves the previous result |
+| `api/accountability` | Pro-only. Mutual consent: POST invites by email (uniform response, no enumeration); GET returns the partner only once both users added each other, plus `incoming` requests; DELETE unlinks all (no Pro check) or `?requestId=` declines one |
 | `api/user/api-key` | Generate / regenerate / revoke `df_`-prefixed VS Code extension API keys |
 | `api/user/stats` | GET aggregated user stats (blocks, roadmap, courses, achievements, tier, XP progress) |
 | `api/auth/github` | GitHub OAuth initiation (CSRF state cookie) |
@@ -209,14 +211,23 @@ Defined in `lib/xp.ts` — single source of truth.
 
 | Export | Description |
 |---|---|
-| `getCurrentUser()` | Checks demo session first, then Supabase auth; upserts user on first login (race-safe) |
+| `getCurrentUser()` | Supabase auth, then demo session; upserts user on first login (race-safe); React `cache`d per request |
 | `awardDailyLoginXP(userId)` | Awards 5 XP at most once per calendar day |
-| `awardXP(userId, amount, { db? })` | Awards XP + updates level; accepts optional transaction client |
+| `awardXP(userId, amount, { db? })` | Atomic increment + level update; accepts optional transaction client |
+| `revokeXP(userId, amount, { db? })` | Takes XP back (clamped at 0), recalculates level; used when a course is deleted |
+| `lockUser(db, userId)` | `SELECT … FOR UPDATE` on the user row — first statement of every check-then-award transaction |
 | `updateStreak(userId)` | Updates streak; awards streak bonuses idempotently via achievement records |
 | `checkAchievements(userId)` | Unlocks achievements with `createMany({ skipDuplicates: true })` — concurrent-safe |
 
 ### Concurrency & Data Integrity
-All XP-awarding routes wrap check → upsert → `awardXP` in a single `prisma.$transaction(...)`. `awardXP` accepts a `db` param (`Omit<PrismaClient, "$connect" | ...>`) to participate in the caller's transaction.
+All XP-awarding routes wrap `lockUser` → check → upsert → `awardXP` in a single `prisma.$transaction(...)`. The row lock matters: under READ COMMITTED two concurrent requests would otherwise both pass the "not yet awarded" check. `awardXP` accepts a `db` param (`Omit<PrismaClient, "$connect" | ...>`) to participate in the caller's transaction.
+
+**XP is paid once per item** — toggling status must never re-award:
+- Blocks / roadmap nodes / projects / courses: `completedAt` is set on first completion and never cleared; it marks "completion XP paid".
+- Block skip XP: only if the block never earned XP. Quiz: try XP on first attempt, pass/perfect bonuses on first pass/perfect per quiz.
+- Roadmap: `roadmapId` must be in `AVAILABLE_ROADMAPS`, `nodeId` must exist in the roadmap source; node type comes from the source.
+- Course delete revokes the course's `xpEarned`.
+- Achievements / GitHub events: `createManyAndReturn({ skipDuplicates })` — only rows actually inserted pay out.
 
 `DailyLog.blocksCompleted` must be incremented **inside** the same `$transaction` when a block is marked COMPLETE — this powers the daily/weekly goal progress bars.
 
@@ -258,6 +269,8 @@ All XP-awarding routes wrap check → upsert → `awardXP` in a single `prisma.$
 ### Freemium Tier System
 - Tiers: FREE, PRO, LIFETIME — resolved by `getUserTier()` in `lib/subscription.ts` (checks `Subscription` row, falls back to `User.subscriptionTier`, defaults to FREE)
 - Pro-gated features: Focus sounds, AI recommendations, Accountability partner, Analytics heatmap
+- Server-side enforcement: `api/ai/recommendations` and `api/accountability` (except DELETE) return 403 for FREE; their widgets don't fetch for FREE users
+- `getUserTier`: a `Subscription` row is authoritative when present; `User.subscriptionTier` is only a fallback when no row exists
 - Free for all: Pomodoro timer, Streak freeze, Body-double mode
 - UI: `ProBadge` and `ProFeatureGate` components gate UI elements
 - `getFeatureFlags(tier)` returns a typed object of booleans for each feature
@@ -267,6 +280,9 @@ All XP-awarding routes wrap check → upsert → `awardXP` in a single `prisma.$
 - Checkout: POST `/api/stripe/checkout` with `{ priceId }`; sets `metadata.userId` so the webhook can resolve the user without an extra DB lookup
 - Portal: POST `/api/stripe/portal` returns a Customer Portal URL for self-service management
 - Webhook at `/api/webhooks/stripe` (must remain in `PUBLIC_PATHS`) handles the full subscription lifecycle
+- Lifetime checkout (payment mode) sets `customer_creation: "always"` — otherwise `session.customer` is null; existing `stripeCustomerId` is reused on re-checkout
+- API version `2025-03-31.basil`: `current_period_end` lives on `subscription.items.data[0]`, not the subscription
+- Webhook mirrors the *effective* tier onto `User.subscriptionTier` (FREE while past due/cancelled); LIFETIME rows are never downgraded by subscription events
 - Upgrade UI: `/settings/upgrade`; `/settings/upgrade/success` polls for tier activation after checkout
 
 ### Demo Mode
@@ -296,10 +312,12 @@ All XP-awarding routes wrap check → upsert → `awardXP` in a single `prisma.$
 
 - **Auth callback**: `next` redirect param validated as relative path (starts with `/`, not `//`) — prevents open redirect
 - **Block progress**: `status` validated against allowlist; `minutesSpent` sanitized to non-negative integer
-- **Roadmap route**: `nodeType` validated against allowlist; stored `nodeType` used on updates to prevent XP manipulation
+- **Roadmap route**: `roadmapId`/`nodeId` validated against the roadmap source; node type taken from the source, never the client
 - **Profile PATCH**: `name` enforced as string ≤ 100 characters
 - **Streak bonuses**: awarded at most once per milestone via achievement record check
-- **Quiz route**: `score` validated as integer 0–100; XP stacks correctly; wrapped in `prisma.$transaction`
+- **Quiz route**: `score` validated as integer 0–100; each XP part paid once per quiz; wrapped in `prisma.$transaction`
+- **Accountability**: mutual consent; no partner data or account existence revealed before both users add each other
+- **GitHub tokens**: encrypted at rest in both OAuth flows when `ENCRYPTION_KEY` is set
 - **GitHub OAuth**: CSRF state cookie validated on callback
 - **GitHub sync XP**: idempotent via `(userId, eventId)` unique constraint — no double-XP on re-sync
 

@@ -45,16 +45,21 @@ export function toastBlockComplete({
   newLevel,
   usedTimer,
 }: BlockCompleteOptions) {
+  // Re-completing an already-completed block earns nothing — don't claim XP
+  const description = xpEarned > 0
+    ? `+${xpEarned} XP${usedTimer ? " (timer bonus)" : ""} · "${blockTitle}"`
+    : `"${blockTitle}"`
+
   if (leveledUp && newLevel) {
     // Level-up: violet/XP style — the premier reward event
     toast.success(`Level ${newLevel} reached!`, {
-      description: `+${xpEarned} XP${usedTimer ? " (timer bonus)" : ""} · "${blockTitle}"`,
+      description,
       duration: 5000,
     })
   } else {
     // Standard block completion
     toast.success("Block complete", {
-      description: `+${xpEarned} XP${usedTimer ? " (timer bonus)" : ""} · "${blockTitle}"`,
+      description,
       duration: 4000,
     })
   }

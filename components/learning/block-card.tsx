@@ -18,7 +18,8 @@ interface BlockCardProps {
   block: LearningBlock
   status: "NOT_STARTED" | "IN_PROGRESS" | "COMPLETED" | "SKIPPED"
   initialNotes?: string
-  onComplete?: (blockId: string, usedTimer: boolean) => Promise<{ leveledUp?: boolean; newLevel?: number; achievements?: UnlockedAchievement[] }>
+  /** Resolves to null when saving failed (the caller already showed an error) */
+  onComplete?: (blockId: string, usedTimer: boolean) => Promise<{ xpAwarded?: number; leveledUp?: boolean; newLevel?: number; achievements?: UnlockedAchievement[] } | null>
   onSkip?: (blockId: string) => void
   readOnly?: boolean
   dict?: Dictionary
@@ -42,9 +43,11 @@ export function BlockCard({ block, status, initialNotes = "", onComplete, onSkip
     setLoading(true)
     try {
       const result = await onComplete(block.id, timerUsed)
+      if (!result) return
       toastBlockComplete({
         blockTitle: block.title,
-        xpEarned: xpValue,
+        // Server-reported XP: 0 when the block had already been completed before
+        xpEarned: result.xpAwarded ?? xpValue,
         leveledUp: result.leveledUp,
         newLevel: result.newLevel,
         usedTimer: timerUsed,
@@ -75,7 +78,9 @@ export function BlockCard({ block, status, initialNotes = "", onComplete, onSkip
       })
       if (onComplete && !isCompleted && !loading) {
         setLoading(true)
-        onComplete(block.id, timerUsed).finally(() => setLoading(false))
+        onComplete(block.id, timerUsed)
+          .then((completion) => completion?.achievements?.forEach(toastAchievementUnlocked))
+          .finally(() => setLoading(false))
       }
     }
   }

@@ -22,7 +22,7 @@ export function WeekSection({ weekNumber, theme, blocks, statusMap, notesMap = {
   const [, startTransition] = useTransition()
 
   const handleComplete = async (blockId: string, usedTimer: boolean) => {
-    if (readOnly) return {}
+    if (readOnly) return null
     let res: Response
     try {
       res = await fetch("/api/progress/block", {
@@ -32,15 +32,15 @@ export function WeekSection({ weekNumber, theme, blocks, statusMap, notesMap = {
       })
     } catch {
       toast.error("Failed to save progress. Please try again.")
-      return {}
+      return null
     }
     if (!res.ok) {
       toast.error("Failed to save progress. Please try again.")
-      return {}
+      return null
     }
     const data = await res.json()
     startTransition(() => router.refresh())
-    return { leveledUp: data.leveledUp, newLevel: data.newLevel, achievements: data.achievements ?? [] }
+    return { xpAwarded: data.xpAwarded, leveledUp: data.leveledUp, newLevel: data.newLevel, achievements: data.achievements ?? [] }
   }
 
   const handleSkip = async (blockId: string) => {

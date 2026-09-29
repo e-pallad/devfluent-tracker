@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { readJson, INVALID_JSON } from "@/lib/http"
 import { getCurrentUser, awardXP, lockUser, checkAchievements } from "@/lib/user"
 import { isDemoUser } from "@/lib/demo"
 import { XP_VALUES } from "@/lib/xp"
@@ -12,7 +13,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Demo mode is read-only" }, { status: 403 })
   }
 
-  const body = await req.json()
+  const body = await readJson(req)
+  if (!body) return NextResponse.json(INVALID_JSON, { status: 400 })
   const { blockId, score, answers } = body
 
   if (!blockId || typeof blockId !== "string") {
