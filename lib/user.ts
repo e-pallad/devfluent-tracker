@@ -13,20 +13,6 @@ type DbClient = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transa
  * Creates it if it doesn't exist yet (first login).
  */
 export async function getCurrentUser() {
-  // E2E test bypass: Playwright sets x-test-user-id cookie instead of a real Supabase session
-  if (process.env.E2E_TEST === 'true') {
-    const { cookies } = await import('next/headers')
-    const cookieStore = await cookies()
-    const testUserId = cookieStore.get('x-test-user-id')?.value
-    if (testUserId) {
-      return prisma.user.upsert({
-        where: { id: testUserId },
-        update: {},
-        create: { id: testUserId, email: `${testUserId}@test.devfluent`, name: 'Test User' },
-      })
-    }
-  }
-
   const supabase = await createClient()
   const { data: { user: authUser } } = await supabase.auth.getUser()
   if (!authUser) {

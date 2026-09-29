@@ -44,6 +44,8 @@ describe("AI recommendations routes", () => {
   beforeEach(async () => {
     setTestUserId(ID)
     await clearRecommendations()
+    // AI coaching is Pro-only; admin-override tier (no Subscription row) keeps setup simple
+    await prisma.user.update({ where: { id: ID }, data: { subscriptionTier: "PRO" } })
     // Fresh vi.fn() per test — call count always starts at 0
     mockCreate = vi.fn().mockResolvedValue(makeClaudeResponse(SAMPLE_RECS))
   })
@@ -120,6 +122,43 @@ describe("AI recommendations routes", () => {
       expect(body.cached).toBe(false)
     })
 
+    it("returns 403 for FREE users without calling Claude", async () => {
+      await prisma.user.update({ where: { id: ID }, data: { subscriptionTier: "FREE" } })
+
+      const res = await GET()
+      expect(res.status).toBe(403)
+      expect(mockCreate).not.toHaveBeenCalled()
+    })
+
+    it("serves the previous recommendations when regeneration fails", async () => {
+      await prisma.aiRecommendation.create({
+        data: { userId: ID, content: JSON.stringify(SAMPLE_RECS), expiresAt: new Date(Date.now() - 1000) },
+      })
+      mockCreate.mockRejectedValueOnce(new Error("API error"))
+
+      const res = await GET()
+      const body = await res.json()
+      expect(body.recommendations).toEqual(SAMPLE_RECS)
+    })
+
+    it("drops malformed items from Claude's reply", async () => {
+      mockCreate.mockResolvedValueOnce({
+        content: [{
+          type: "text",
+          text: JSON.stringify([
+            SAMPLE_RECS[0],
+            { title: "No priority", description: "x", icon: "❓" },
+            "not an object",
+            { title: "Bad priority", description: "x", priority: "urgent", icon: "❓" },
+          ]),
+        }],
+      })
+
+      const res = await GET()
+      const body = await res.json()
+      expect(body.recommendations).toEqual([SAMPLE_RECS[0]])
+    })
+
     it("handles Claude response wrapped in markdown code fences", async () => {
       mockCreate.mockResolvedValueOnce({
         content: [{ type: "text", text: "```json\n" + JSON.stringify(SAMPLE_RECS) + "\n```" }],
@@ -167,6 +206,29 @@ describe("AI recommendations routes", () => {
 
       expect(body.cached).toBe(false)
       expect(mockCreate).toHaveBeenCalledOnce()
+    })
+
+    it("returns 403 for FREE users without calling Claude", async () => {
+      await prisma.user.update({ where: { id: ID }, data: { subscriptionTier: "FREE" } })
+
+      const res = await POST()
+      expect(res.status).toBe(403)
+      expect(mockCreate).not.toHaveBeenCalled()
+    })
+
+    it("keeps the cached row (and its rate limit) when regeneration fails", async () => {
+      const generatedAt = new Date(Date.now() - 2 * 60 * 60 * 1000)
+      await prisma.aiRecommendation.create({
+        data: { userId: ID, content: JSON.stringify(SAMPLE_RECS), expiresAt: new Date(Date.now() + 1000 * 60 * 60), generatedAt },
+      })
+      mockCreate.mockRejectedValueOnce(new Error("API error"))
+
+      const res = await POST()
+      const body = await res.json()
+      expect(body.recommendations).toEqual(SAMPLE_RECS)
+
+      const record = await prisma.aiRecommendation.findUnique({ where: { userId: ID } })
+      expect(record).not.toBeNull()
     })
 
     it("updates the cache record after force-refresh", async () => {

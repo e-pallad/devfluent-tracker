@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { getCurrentUser } from "@/lib/user"
-import { encryptToken } from "@/lib/encryption"
+import { encryptTokenIfConfigured } from "@/lib/encryption"
 
 function getAppOrigin(req: NextRequest): string {
   const configured = process.env.NEXT_PUBLIC_APP_URL?.trim()
@@ -85,20 +85,10 @@ export async function GET(req: NextRequest) {
       return NextResponse.redirect(new URL("/settings?error=github_user_failed", appOrigin))
     }
 
-    // Encrypt token before storing (if encryption key is available)
-    let encryptedToken = accessToken
-    try {
-      if (process.env.ENCRYPTION_KEY) {
-        encryptedToken = encryptToken(accessToken)
-      }
-    } catch (err) {
-      console.error(`[github/callback:${reqId}] Token encryption failed`, err)
-      // Fall through with unencrypted token if encryption fails
-    }
-
     await prisma.user.update({
       where: { id: user.id },
-      data: { githubUsername, githubAccessToken: encryptedToken },
+      // Encrypted at rest when ENCRYPTION_KEY is set
+      data: { githubUsername, githubAccessToken: encryptTokenIfConfigured(accessToken) },
     })
 
     console.info(`[github/callback:${reqId}] GitHub account connected`, {

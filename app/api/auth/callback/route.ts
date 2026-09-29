@@ -35,11 +35,14 @@ async function persistGithubCredentials(args: {
 
   try {
     const { prisma } = await import("@/lib/prisma")
+    const { encryptTokenIfConfigured } = await import("@/lib/encryption")
+    // Same at-rest encryption as the "Connect GitHub" flow; sync decrypts either way
+    const githubAccessToken = encryptTokenIfConfigured(args.githubAccessToken)
     await prisma.user.upsert({
       where: { id: args.userId },
       update: {
         githubUsername: args.githubUsername,
-        githubAccessToken: args.githubAccessToken,
+        githubAccessToken,
       },
       create: {
         id: args.userId,
@@ -47,7 +50,7 @@ async function persistGithubCredentials(args: {
         name: args.name,
         avatarUrl: args.avatarUrl,
         githubUsername: args.githubUsername,
-        githubAccessToken: args.githubAccessToken,
+        githubAccessToken,
       },
     })
   } catch (err) {
