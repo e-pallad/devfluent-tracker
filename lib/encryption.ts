@@ -55,3 +55,30 @@ export function decryptToken(encrypted: string): string {
     return ""
   }
 }
+
+// iv (16 bytes) : GCM auth tag (16 bytes) : ciphertext — all hex
+const ENCRYPTED_FORMAT = /^[0-9a-f]{32}:[0-9a-f]{32}:[0-9a-f]+$/i
+
+/**
+ * Encrypt a token for storage when ENCRYPTION_KEY is configured; otherwise
+ * (or if encryption fails) return it unchanged so auth flows never break.
+ */
+export function encryptTokenIfConfigured(plaintext: string): string {
+  if (!process.env.ENCRYPTION_KEY) return plaintext
+  try {
+    return encryptToken(plaintext)
+  } catch (err) {
+    console.error("Token encryption failed; storing unencrypted:", err)
+    return plaintext
+  }
+}
+
+/**
+ * Read a stored token. Values in the encrypted format are decrypted (returns
+ * "" if that fails); anything else is a legacy plaintext token and is returned
+ * as-is, so tokens saved before encryption was enabled keep working.
+ */
+export function decryptStoredToken(stored: string): string {
+  if (!ENCRYPTED_FORMAT.test(stored)) return stored
+  return decryptToken(stored)
+}

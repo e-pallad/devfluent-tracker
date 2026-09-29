@@ -18,25 +18,33 @@ function fetchRecommendations(force: boolean): Promise<Recommendation[]> {
     .catch(() => [])
 }
 
+// Static sample shown (muted) behind the Pro gate — free users never hit the API
+const PREVIEW_RECOMMENDATIONS: Recommendation[] = [
+  { title: "Finish this week's blocks", description: "Two blocks left to hit your weekly goal.", priority: "high", icon: "🎯" },
+  { title: "Revisit a tricky quiz", description: "Retake the quiz you scored lowest on.", priority: "medium", icon: "📝" },
+  { title: "Protect your streak", description: "A short block today keeps momentum going.", priority: "low", icon: "🔥" },
+]
+
 interface AiRecommendationsProps {
   isProUser?: boolean
 }
 
 export function AiRecommendations({ isProUser = false }: AiRecommendationsProps) {
-  const [recs, setRecs] = useState<Recommendation[]>([])
-  const [loading, setLoading] = useState(true)
+  const [recs, setRecs] = useState<Recommendation[]>(isProUser ? [] : PREVIEW_RECOMMENDATIONS)
+  const [loading, setLoading] = useState(isProUser)
   const [refreshing, setRefreshing] = useState(false)
   const initialFetched = useRef(false)
 
   useEffect(() => {
-    if (initialFetched.current) return
+    if (!isProUser || initialFetched.current) return
     initialFetched.current = true
     fetchRecommendations(false)
       .then((data) => { setRecs(data) })
       .finally(() => { setLoading(false) })
-  }, [])
+  }, [isProUser])
 
   function handleRefresh() {
+    if (!isProUser) return
     setRefreshing(true)
     fetchRecommendations(true)
       .then((data) => { setRecs(data) })

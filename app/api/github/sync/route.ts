@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { getCurrentUser, awardXP, lockUser } from "@/lib/user"
-import { decryptToken } from "@/lib/encryption"
+import { decryptStoredToken } from "@/lib/encryption"
 import { XP_VALUES } from "@/lib/xp"
 
 const XP_MAP: Record<string, number> = {
@@ -30,8 +30,8 @@ export async function POST() {
     return NextResponse.json({ error: "GitHub not connected" }, { status: 400 })
   }
 
-  // Decrypt token (gracefully falls back to raw token if not encrypted)
-  const githubToken = process.env.ENCRYPTION_KEY ? decryptToken(user.githubAccessToken) : user.githubAccessToken
+  // Decrypt token (legacy plaintext tokens are used as-is)
+  const githubToken = decryptStoredToken(user.githubAccessToken)
   if (!githubToken) {
     return NextResponse.json({ error: "Failed to decrypt GitHub token" }, { status: 500 })
   }

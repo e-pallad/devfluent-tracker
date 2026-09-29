@@ -4,8 +4,11 @@ import { getCurrentUser } from "@/lib/user"
 import Anthropic from "@anthropic-ai/sdk"
 import { getTrackById, CURRICULUM } from "@/content/curriculum"
 import { isDemoUser } from "@/lib/demo"
+import { getUserTier, isFeatureAvailable } from "@/lib/subscription"
 
 const CACHE_HOURS = 24
+const MAX_RECOMMENDATIONS = 5
+const PRIORITIES = new Set(["high", "medium", "low"])
 
 interface Recommendation {
   title: string
@@ -87,11 +90,39 @@ Learner data:
     messages: [{ role: "user", content: prompt }],
   })
 
-  const text = message.content[0].type === "text" ? message.content[0].text : ""
+  const text = message.content[0]?.type === "text" ? message.content[0].text : ""
   // Extract JSON array from response (may have markdown fences)
   const match = text.match(/\[[\s\S]*\]/)
   if (!match) return []
-  return JSON.parse(match[0]) as Recommendation[]
+  return sanitizeRecommendations(JSON.parse(match[0]))
+}
+
+/** Keep only well-formed items so a malformed model reply can't break the widget. */
+function sanitizeRecommendations(value: unknown): Recommendation[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item): item is Recommendation =>
+      typeof item === "object" && item !== null &&
+      typeof item.title === "string" && item.title.length > 0 &&
+      typeof item.description === "string" &&
+      typeof item.icon === "string" &&
+      PRIORITIES.has(item.priority)
+    )
+    .slice(0, MAX_RECOMMENDATIONS)
+    .map(({ title, description, priority, icon }) => ({
+      title: title.slice(0, 100),
+      description: description.slice(0, 300),
+      priority,
+      icon: icon.slice(0, 8),
+    }))
+}
+
+function parseCached(content: string): Recommendation[] {
+  try {
+    return sanitizeRecommendations(JSON.parse(content))
+  } catch {
+    return []
+  }
 }
 
 async function getOrGenerateRecommendations(userId: string): Promise<NextResponse> {
@@ -107,10 +138,20 @@ async function getOrGenerateRecommendations(userId: string): Promise<NextRespons
     })
 
     return NextResponse.json({ recommendations, cached: false })
-  } catch {
-    return NextResponse.json({ recommendations: [], cached: false })
+  } catch (err) {
+    console.error("[ai/recommendations] Generation failed", err)
+    // Serve the previous (possibly expired) recommendations rather than nothing
+    const stale = await prisma.aiRecommendation.findUnique({ where: { userId } }).catch(() => null)
+    return NextResponse.json({ recommendations: stale ? parseCached(stale.content) : [], cached: Boolean(stale) })
   }
 }
+
+/** AI coaching is a Pro feature — enforce it here, not just in the UI (each call costs money). */
+async function hasAiAccess(userId: string): Promise<boolean> {
+  return isFeatureAvailable(await getUserTier(userId), "aiRecommendations")
+}
+
+const PRO_REQUIRED = { error: "AI recommendations are a Pro feature" }
 
 export async function GET() {
   const user = await getCurrentUser()
@@ -118,12 +159,15 @@ export async function GET() {
   if (isDemoUser(user)) {
     return NextResponse.json({ recommendations: DEMO_RECOMMENDATIONS, cached: true })
   }
+  if (!(await hasAiAccess(user.id))) {
+    return NextResponse.json(PRO_REQUIRED, { status: 403 })
+  }
 
   // Return cached recommendation if still valid
   const cached = await prisma.aiRecommendation.findUnique({ where: { userId: user.id } })
   if (cached && new Date(cached.expiresAt) > new Date()) {
     return NextResponse.json({
-      recommendations: JSON.parse(cached.content) as Recommendation[],
+      recommendations: parseCached(cached.content),
       cached: true,
     })
   }
@@ -137,8 +181,13 @@ export async function POST() {
   if (isDemoUser(user)) {
     return NextResponse.json({ recommendations: DEMO_RECOMMENDATIONS, cached: true })
   }
+  if (!(await hasAiAccess(user.id))) {
+    return NextResponse.json(PRO_REQUIRED, { status: 403 })
+  }
 
-  // Rate-limit forced regeneration to once per hour (prevents unbounded API cost)
+  // Rate-limit forced regeneration to once per hour (prevents unbounded API cost).
+  // The cached row is kept until a new result replaces it, so a failed
+  // generation can't erase the rate-limit marker.
   const existing = await prisma.aiRecommendation.findUnique({ where: { userId: user.id } })
   if (existing) {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000)
@@ -146,9 +195,6 @@ export async function POST() {
       return NextResponse.json({ error: "Too many requests. Try again later." }, { status: 429 })
     }
   }
-
-  // Delete cache to force regeneration
-  await prisma.aiRecommendation.deleteMany({ where: { userId: user.id } })
 
   return getOrGenerateRecommendations(user.id)
 }

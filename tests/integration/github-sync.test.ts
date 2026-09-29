@@ -3,6 +3,7 @@ import { POST, DELETE } from "@/app/api/github/sync/route"
 import { prisma } from "@/lib/prisma"
 import { setTestUserId } from "../setup"
 import { createTestUser, deleteTestUser } from "../helpers/test-user"
+import { encryptToken } from "@/lib/encryption"
 
 const ID = "test-user-github-sync"
 
@@ -163,6 +164,41 @@ describe("GitHub sync routes", () => {
 
       const user = await prisma.user.findUnique({ where: { id: ID } })
       expect(user!.totalXP).toBe(10)
+    })
+
+    describe("with ENCRYPTION_KEY configured", () => {
+      const original = process.env.ENCRYPTION_KEY
+      beforeEach(() => { process.env.ENCRYPTION_KEY = "b".repeat(64) })
+      afterEach(() => {
+        if (original === undefined) delete process.env.ENCRYPTION_KEY
+        else process.env.ENCRYPTION_KEY = original
+      })
+
+      function authHeaderOfFirstFetch(): string {
+        const [, init] = (fetch as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]
+        return (init.headers as Record<string, string>).Authorization
+      }
+
+      it("decrypts an encrypted token before calling GitHub", async () => {
+        await prisma.user.update({
+          where: { id: ID },
+          data: { githubUsername: "gh-testuser", githubAccessToken: encryptToken("gho_encrypted") },
+        })
+        stubFetch([])
+
+        const res = await POST()
+        expect(res.status).toBe(200)
+        expect(authHeaderOfFirstFetch()).toBe("Bearer gho_encrypted")
+      })
+
+      it("still works with a legacy plaintext token (e.g. saved by GitHub sign-in)", async () => {
+        await connectGithub() // stores "test-token" unencrypted
+        stubFetch([])
+
+        const res = await POST()
+        expect(res.status).toBe(200)
+        expect(authHeaderOfFirstFetch()).toBe("Bearer test-token")
+      })
     })
 
     it("creates a GithubEvent record for each new event", async () => {
