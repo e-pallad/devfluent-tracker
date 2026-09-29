@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useTransition } from "react"
+import { toast } from "sonner"
 import { RoadmapNodeItem } from "@/components/roadmap/roadmap-node-item"
 import { ProgressBar } from "@/components/ui/progress-bar"
 import type { RoadmapSection } from "@/lib/roadmap"
@@ -18,6 +19,7 @@ export function RoadmapList({ sections, roadmapId, initialProgress }: RoadmapLis
   const [, startTransition] = useTransition()
 
   const handleStatusChange = (nodeId: string, status: NodeStatus) => {
+    const previous = progress[nodeId] ?? "NOT_STARTED"
     setProgress((prev) => ({ ...prev, [nodeId]: status }))
 
     startTransition(async () => {
@@ -26,11 +28,17 @@ export function RoadmapList({ sections, roadmapId, initialProgress }: RoadmapLis
         .find((n) => n.id === nodeId)
       if (!node) return
 
-      await fetch("/api/progress/roadmap", {
+      const res = await fetch("/api/progress/roadmap", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ roadmapId, nodeId, nodeLabel: node.label, nodeType: node.type, status }),
-      })
+      }).catch(() => null)
+
+      // Roll back the optimistic update so the UI never shows unsaved progress
+      if (!res?.ok) {
+        setProgress((prev) => ({ ...prev, [nodeId]: previous }))
+        toast.error("Couldn't save progress. Please try again.")
+      }
     })
   }
 

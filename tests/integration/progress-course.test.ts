@@ -36,6 +36,15 @@ describe("POST /api/progress/course", () => {
       const res = await POST(makePost("/api/progress/course", { action: "create", platform: "Udemy" }))
       expect(res.status).toBe(400)
     })
+
+    it("returns 400 for a negative or non-integer totalLessons", async () => {
+      for (const totalLessons of [-5, 2.5, "ten"]) {
+        const res = await POST(makePost("/api/progress/course", {
+          action: "create", title: "T", platform: "P", totalLessons,
+        }))
+        expect(res.status).toBe(400)
+      }
+    })
   })
 
   describe("action: update", () => {
@@ -123,6 +132,11 @@ describe("POST /api/progress/course", () => {
       const user = await prisma.user.findUnique({ where: { id: ID } })
       expect(user!.totalXP).toBe(0)
       expect(user!.level).toBe(1)
+    })
+
+    it("returns 400 when the course id is missing", async () => {
+      const res = await POST(makePost("/api/progress/course", { action: "delete" }))
+      expect(res.status).toBe(400)
     })
 
     it("returns 404 when trying to delete a non-existent course", async () => {

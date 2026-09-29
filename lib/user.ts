@@ -1,3 +1,4 @@
+import { cache } from "react"
 import { startOfDay, differenceInCalendarDays } from "date-fns"
 import { createClient } from "@/lib/supabase/server"
 import { prisma } from "@/lib/prisma"
@@ -11,8 +12,11 @@ type DbClient = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transa
 /**
  * Gets the current authenticated user's database record.
  * Creates it if it doesn't exist yet (first login).
+ *
+ * Wrapped in React `cache` so the layout and page of one request share a
+ * single Supabase auth check and DB read (a no-op outside Server Components).
  */
-export async function getCurrentUser() {
+export const getCurrentUser = cache(async () => {
   const supabase = await createClient()
   const { data: { user: authUser } } = await supabase.auth.getUser()
   if (!authUser) {
@@ -21,6 +25,10 @@ export async function getCurrentUser() {
     }
     return null
   }
+
+  // Read first — the upsert below is a write and only needed on first login
+  const existing = await prisma.user.findUnique({ where: { id: authUser.id } })
+  if (existing) return existing
 
   // upsert prevents unique constraint errors when concurrent requests race on first login
   const user = await prisma.user.upsert({
@@ -35,7 +43,7 @@ export async function getCurrentUser() {
   })
 
   return user
-}
+})
 
 /**
  * Award the 5 XP daily login bonus — idempotent, at most once per calendar day.

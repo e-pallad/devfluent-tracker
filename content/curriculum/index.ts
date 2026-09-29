@@ -61,8 +61,15 @@ export function getAllBlocks(): LearningBlock[] {
   return TRACKS.flatMap((t) => t.months.flatMap((m) => m.weeks.flatMap((w) => w.blocks)))
 }
 
+// Built once — getBlock runs on every progress/quiz request. First occurrence
+// wins, matching the previous Array.find lookup.
+const BLOCKS_BY_ID = new Map<string, LearningBlock>()
+for (const block of getAllBlocks()) {
+  if (!BLOCKS_BY_ID.has(block.id)) BLOCKS_BY_ID.set(block.id, block)
+}
+
 export function getBlock(blockId: string): LearningBlock | undefined {
-  return getAllBlocks().find((b) => b.id === blockId)
+  return BLOCKS_BY_ID.get(blockId)
 }
 
 export const BLOCK_TYPE_COLORS: Record<LearningBlock["type"], string> = {

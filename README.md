@@ -138,6 +138,8 @@ Open [http://localhost:3000](http://localhost:3000) and sign in with a magic lin
 | `STRIPE_WEBHOOK_SECRET` | optional | Stripe webhook signing secret |
 | `STRIPE_PRICE_MONTHLY_ID` | optional | Stripe Price ID for monthly Pro plan |
 | `STRIPE_PRICE_ANNUAL_ID` | optional | Stripe Price ID for annual Pro plan |
+| `STRIPE_PRICE_LIFETIME_ID` | optional | Stripe Price ID for the one-time lifetime plan |
+| `ENCRYPTION_KEY` | optional | 64 hex chars (32 bytes, e.g. `openssl rand -hex 32`) — encrypts stored GitHub tokens at rest |
 
 <details>
 <summary><strong>Why two database URLs?</strong></summary>

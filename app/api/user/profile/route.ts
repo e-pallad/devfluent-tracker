@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { readJson, INVALID_JSON } from "@/lib/http"
 import { getCurrentUser } from "@/lib/user"
 import { TRACKS } from "@/content/curriculum"
 
@@ -7,7 +8,8 @@ export async function PATCH(req: NextRequest) {
   const user = await getCurrentUser()
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
 
-  const body = await req.json()
+  const body = await readJson(req)
+  if (!body) return NextResponse.json(INVALID_JSON, { status: 400 })
   const { name, track, dailyGoalBlocks, weeklyGoalBlocks } = body
 
   if (name !== undefined && name !== null && (typeof name !== "string" || name.length > 100)) {

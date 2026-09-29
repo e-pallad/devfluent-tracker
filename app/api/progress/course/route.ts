@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { readJson, INVALID_JSON } from "@/lib/http"
 import { getCurrentUser, awardXP, revokeXP, lockUser, checkAchievements } from "@/lib/user"
 import { isDemoUser } from "@/lib/demo"
 import { XP_VALUES } from "@/lib/xp"
@@ -11,7 +12,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Demo mode is read-only" }, { status: 403 })
   }
 
-  const body = await req.json()
+  const body = await readJson(req)
+  if (!body) return NextResponse.json(INVALID_JSON, { status: 400 })
   const { action, ...data } = body
 
   if (action === "create") {
@@ -21,6 +23,10 @@ export async function POST(req: NextRequest) {
     }
     if (typeof platform !== "string" || platform.length === 0 || platform.length > 100) {
       return NextResponse.json({ error: "Platform must be 1–100 characters" }, { status: 400 })
+    }
+    if (totalLessons !== undefined && totalLessons !== null &&
+        (!Number.isInteger(totalLessons) || totalLessons < 0 || totalLessons > 10000)) {
+      return NextResponse.json({ error: "totalLessons must be an integer 0–10000" }, { status: 400 })
     }
     if (url !== undefined && url !== null) {
       try {
@@ -40,7 +46,7 @@ export async function POST(req: NextRequest) {
           title,
           platform,
           url: url || null,
-          totalLessons: Number(totalLessons) || 0,
+          totalLessons: totalLessons ?? 0,
           xpEarned: XP_VALUES.ADD_COURSE,
         },
       })
@@ -53,7 +59,7 @@ export async function POST(req: NextRequest) {
 
   if (action === "update") {
     const { id, completedLessons } = data
-    if (!id) return NextResponse.json({ error: "Missing course id" }, { status: 400 })
+    if (!id || typeof id !== "string") return NextResponse.json({ error: "Missing course id" }, { status: 400 })
     if (typeof completedLessons !== "number" || !Number.isInteger(completedLessons) || completedLessons < 0) {
       return NextResponse.json({ error: "completedLessons must be a non-negative integer" }, { status: 400 })
     }
@@ -96,6 +102,7 @@ export async function POST(req: NextRequest) {
 
   if (action === "delete") {
     const { id } = data
+    if (!id || typeof id !== "string") return NextResponse.json({ error: "Missing course id" }, { status: 400 })
     const deleted = await prisma.$transaction(async (tx) => {
       await lockUser(tx, user.id)
 

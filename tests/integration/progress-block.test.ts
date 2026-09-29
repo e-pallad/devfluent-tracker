@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest"
-import { POST } from "@/app/api/progress/block/route"
+import { NextRequest } from "next/server"
+import { POST, PATCH } from "@/app/api/progress/block/route"
 import { prisma } from "@/lib/prisma"
 import { setTestUserId } from "../setup"
-import { makePost } from "../helpers/make-request"
+import { makePost, makePatch } from "../helpers/make-request"
 import { createTestUser, resetTestUser, deleteTestUser } from "../helpers/test-user"
 
 const ID = "test-user-block"
@@ -123,11 +124,51 @@ describe("POST /api/progress/block", () => {
     expect(user!.totalXP).toBe(20) // 10 (block) + 10 (first_block achievement)
   })
 
+  it("returns 400 for a malformed JSON body", async () => {
+    const res = await POST(new NextRequest("http://localhost/api/progress/block", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{not json",
+    }))
+    expect(res.status).toBe(400)
+  })
+
+  it("returns 400 when blockId is not a string", async () => {
+    const res = await POST(makePost("/api/progress/block", { blockId: 42, status: "COMPLETED" }))
+    expect(res.status).toBe(400)
+  })
+
   it("sanitizes negative minutesSpent to 0", async () => {
     await POST(makePost("/api/progress/block", { blockId: BLOCK, status: "COMPLETED", minutesSpent: -99 }))
     const bp = await prisma.blockProgress.findUnique({
       where: { userId_blockId: { userId: ID, blockId: BLOCK } },
     })
     expect(bp!.minutesSpent).toBe(0)
+  })
+})
+
+describe("PATCH /api/progress/block (notes)", () => {
+  beforeAll(async () => { await createTestUser(ID) })
+  beforeEach(async () => { setTestUserId(ID); await resetTestUser(ID) })
+  afterAll(async () => { await deleteTestUser(ID) })
+
+  it("saves notes for a real block", async () => {
+    const res = await PATCH(makePatch("/api/progress/block", { blockId: BLOCK, notes: "remember closures" }))
+    expect(res.status).toBe(200)
+    const bp = await prisma.blockProgress.findUnique({
+      where: { userId_blockId: { userId: ID, blockId: BLOCK } },
+    })
+    expect(bp!.notes).toBe("remember closures")
+  })
+
+  it("returns 404 for a block that isn't in the curriculum", async () => {
+    const res = await PATCH(makePatch("/api/progress/block", { blockId: "not-a-block", notes: "x" }))
+    expect(res.status).toBe(404)
+    expect(await prisma.blockProgress.count({ where: { userId: ID } })).toBe(0)
+  })
+
+  it("returns 400 when blockId is not a string", async () => {
+    const res = await PATCH(makePatch("/api/progress/block", { blockId: { $ne: null }, notes: "x" }))
+    expect(res.status).toBe(400)
   })
 })
