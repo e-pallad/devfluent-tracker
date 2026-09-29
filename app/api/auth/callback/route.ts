@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createCallbackClient } from "@/lib/supabase/server"
 import { DEMO_SESSION_COOKIE } from "@/lib/demo"
+import { encryptTokenIfConfigured } from "@/lib/encryption"
 
 // Resolve the canonical app origin so redirects always target the public
 // domain (https://devfluent.de) and never the Docker-internal binding
@@ -35,7 +36,6 @@ async function persistGithubCredentials(args: {
 
   try {
     const { prisma } = await import("@/lib/prisma")
-    const { encryptTokenIfConfigured } = await import("@/lib/encryption")
     // Same at-rest encryption as the "Connect GitHub" flow; sync decrypts either way
     const githubAccessToken = encryptTokenIfConfigured(args.githubAccessToken)
     await prisma.user.upsert({
