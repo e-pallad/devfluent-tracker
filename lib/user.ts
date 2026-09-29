@@ -72,6 +72,17 @@ export async function awardDailyLoginXP(userId: string): Promise<void> {
 }
 
 /**
+ * Lock the user's row until the surrounding transaction ends.
+ *
+ * Call this first in every transaction that checks state and then awards XP:
+ * under READ COMMITTED two concurrent requests would otherwise both pass the
+ * "not yet awarded" check and both pay out.
+ */
+export async function lockUser(db: DbClient, userId: string): Promise<void> {
+  await db.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`
+}
+
+/**
  * Award XP to a user and recalculate level.
  * Returns the updated user and whether they leveled up.
  */
@@ -81,17 +92,21 @@ export async function awardXP(
   context: { date?: Date; db?: DbClient } = {}
 ): Promise<{ leveledUp: boolean; newLevel: number; newXP: number }> {
   const db = context.db ?? prisma
-  const user = await db.user.findUnique({ where: { id: userId } })
-  if (!user) throw new Error("User not found")
 
-  const newXP = user.totalXP + amount
-  const newLevel = getLevelFromXP(newXP)
-  const leveledUp = newLevel > user.level
-
-  await db.user.update({
+  // Atomic increment — a read-then-write would lose concurrent awards
+  const updated = await db.user.update({
     where: { id: userId },
-    data: { totalXP: newXP, level: newLevel },
+    data: { totalXP: { increment: amount } },
+    select: { totalXP: true, level: true },
   })
+
+  const newXP = updated.totalXP
+  const newLevel = getLevelFromXP(newXP)
+  const leveledUp = newLevel > updated.level
+
+  if (newLevel !== updated.level) {
+    await db.user.update({ where: { id: userId }, data: { level: newLevel } })
+  }
 
   // Update or create today's daily log
   const today = context.date ?? new Date()
@@ -104,6 +119,33 @@ export async function awardXP(
   })
 
   return { leveledUp, newLevel, newXP }
+}
+
+/**
+ * Take back XP that was granted for something the user has since removed
+ * (e.g. a deleted course). Never drops below 0; recalculates level.
+ * Daily logs are left alone — they record what was earned that day.
+ */
+export async function revokeXP(
+  userId: string,
+  amount: number,
+  context: { db?: DbClient } = {}
+): Promise<{ newLevel: number; newXP: number }> {
+  const db = context.db ?? prisma
+
+  const updated = await db.user.update({
+    where: { id: userId },
+    data: { totalXP: { decrement: amount } },
+    select: { totalXP: true, level: true },
+  })
+
+  const newXP = Math.max(0, updated.totalXP)
+  const newLevel = getLevelFromXP(newXP)
+  if (newXP !== updated.totalXP || newLevel !== updated.level) {
+    await db.user.update({ where: { id: userId }, data: { totalXP: newXP, level: newLevel } })
+  }
+
+  return { newLevel, newXP }
 }
 
 /**
@@ -195,17 +237,21 @@ export interface UnlockedAchievement {
  * Check and unlock any newly earned achievements.
  */
 export async function checkAchievements(userId: string): Promise<UnlockedAchievement[]> {
-  const [user, existingAchievements, projects, blocks, quizAttempts, quizzesPassed, perfectQuizzes, githubPushes, githubPRsMerged, accountabilityCount] = await Promise.all([
+  const [user, existingAchievements, projects, blocks, quizAttempts, passedQuizBlocks, perfectQuizBlocks, githubPushes, githubPRsMerged, accountabilityCount] = await Promise.all([
     prisma.user.findUnique({ where: { id: userId } }),
     prisma.achievement.findMany({ where: { userId }, select: { slug: true } }),
     prisma.monthlyProject.count({ where: { userId, status: "COMPLETED" } }),
     prisma.blockProgress.count({ where: { userId, status: "COMPLETED" } }),
     prisma.quizAttempt.count({ where: { userId } }),
-    prisma.quizAttempt.count({ where: { userId, passed: true } }),
-    prisma.quizAttempt.count({ where: { userId, perfect: true } }),
+    // Distinct quizzes, not attempts — retaking one quiz must not unlock "pass 5 quizzes"
+    prisma.quizAttempt.groupBy({ by: ["blockId"], where: { userId, passed: true } }),
+    prisma.quizAttempt.groupBy({ by: ["blockId"], where: { userId, perfect: true } }),
     prisma.githubEvent.count({ where: { userId, eventType: "PushEvent" } }),
-    prisma.githubEvent.count({ where: { userId, eventType: "PullRequestEvent", xpAwarded: { gte: 20 } } }),
-    prisma.accountabilityPair.count({ where: { OR: [{ requesterId: userId }, { partnerId: userId }] } }),
+    prisma.githubEvent.count({ where: { userId, eventType: "PullRequestEvent", xpAwarded: { gte: XP_VALUES.GITHUB_PR_MERGED } } }),
+    // Only confirmed (mutual) partnerships count
+    prisma.accountabilityPair.count({
+      where: { requesterId: userId, partner: { sentPairs: { some: { partnerId: userId } } } },
+    }),
   ])
 
   if (!user) return []
@@ -218,8 +264,8 @@ export async function checkAchievements(userId: string): Promise<UnlockedAchieve
     projectsCompleted: projects,
     blocksCompleted: blocks,
     quizAttempts,
-    quizzesPassed,
-    perfectQuizzes,
+    quizzesPassed: passedQuizBlocks.length,
+    perfectQuizzes: perfectQuizBlocks.length,
     githubPushes,
     githubPRsMerged,
     accountabilityLinked: accountabilityCount > 0,
@@ -231,10 +277,11 @@ export async function checkAchievements(userId: string): Promise<UnlockedAchieve
 
   if (toUnlock.length === 0) return []
 
-  // skipDuplicates prevents unique constraint errors from concurrent calls
-  // Wrap in transaction to ensure achievement creation and XP award are atomic
-  await prisma.$transaction(async (tx) => {
-    await tx.achievement.createMany({
+  // skipDuplicates prevents unique constraint errors from concurrent calls; only
+  // the rows this call actually inserted pay out, so a concurrent call that
+  // computed the same toUnlock list cannot award the bonus twice.
+  const unlocked = await prisma.$transaction(async (tx) => {
+    const created = await tx.achievement.createManyAndReturn({
       data: toUnlock.map((def) => ({
         userId,
         slug: def.slug,
@@ -244,15 +291,19 @@ export async function checkAchievements(userId: string): Promise<UnlockedAchieve
         xpBonus: def.xpBonus,
       })),
       skipDuplicates: true,
+      select: { slug: true },
     })
+    const createdSlugs = new Set(created.map((a) => a.slug))
+    const newlyUnlocked = toUnlock.filter((def) => createdSlugs.has(def.slug))
 
-    const totalXPBonus = toUnlock.reduce((sum, def) => sum + (def.xpBonus > 0 ? def.xpBonus : 0), 0)
+    const totalXPBonus = newlyUnlocked.reduce((sum, def) => sum + (def.xpBonus > 0 ? def.xpBonus : 0), 0)
     if (totalXPBonus > 0) {
       await awardXP(userId, totalXPBonus, { db: tx })
     }
+    return newlyUnlocked
   })
 
-  return toUnlock.map((d) => ({
+  return unlocked.map((d) => ({
     slug: d.slug,
     label: d.label,
     description: d.description,

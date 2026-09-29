@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getCurrentUser, awardXP, checkAchievements } from "@/lib/user"
+import { getCurrentUser, awardXP, lockUser, checkAchievements } from "@/lib/user"
 import { isDemoUser } from "@/lib/demo"
 import { XP_VALUES } from "@/lib/xp"
 import { getBlock } from "@/content/curriculum"
@@ -33,12 +33,21 @@ export async function POST(req: NextRequest) {
   const passed = score >= 70
   const perfect = score === 100
 
-  // XP stacks: always award try XP; add pass and/or perfect bonuses on top
-  let xpToAward = XP_VALUES.QUIZ_TRY
-  if (passed) xpToAward += XP_VALUES.QUIZ_PASS
-  if (perfect) xpToAward += XP_VALUES.QUIZ_PERFECT
+  // XP stacks, but each part pays out once per quiz: try XP on the first attempt,
+  // the pass bonus on the first pass, the perfect bonus on the first perfect score.
+  // Retakes are still recorded (stats, achievements) but earn nothing.
+  const { attempt, xpEarned, leveledUp, newLevel, newXP } = await prisma.$transaction(async (tx) => {
+    await lockUser(tx, user.id)
 
-  const { attempt, leveledUp, newLevel, newXP } = await prisma.$transaction(async (tx) => {
+    const previous = await tx.quizAttempt.findMany({
+      where: { userId: user.id, blockId },
+      select: { passed: true, perfect: true },
+    })
+    let xpEarned = 0
+    if (previous.length === 0) xpEarned += XP_VALUES.QUIZ_TRY
+    if (passed && !previous.some((a) => a.passed)) xpEarned += XP_VALUES.QUIZ_PASS
+    if (perfect && !previous.some((a) => a.perfect)) xpEarned += XP_VALUES.QUIZ_PERFECT
+
     const attempt = await tx.quizAttempt.create({
       data: {
         userId: user.id,
@@ -46,19 +55,21 @@ export async function POST(req: NextRequest) {
         score,
         passed,
         perfect,
-        xpEarned: xpToAward,
+        xpEarned,
       },
     })
 
-    const result = await awardXP(user.id, xpToAward, { db: tx })
-
-    return { attempt, leveledUp: result.leveledUp, newLevel: result.newLevel, newXP: result.newXP }
+    if (xpEarned === 0) {
+      return { attempt, xpEarned, leveledUp: false, newLevel: user.level, newXP: user.totalXP }
+    }
+    const result = await awardXP(user.id, xpEarned, { db: tx })
+    return { attempt, xpEarned, leveledUp: result.leveledUp, newLevel: result.newLevel, newXP: result.newXP }
   })
 
   const unlockedAchievements = await checkAchievements(user.id)
 
   return NextResponse.json({
-    xpEarned: xpToAward,
+    xpEarned,
     passed,
     perfect,
     leveledUp,

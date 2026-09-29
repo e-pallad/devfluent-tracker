@@ -73,6 +73,15 @@ describe("POST /api/progress/course", () => {
       expect(user!.totalXP).toBe(50) // Not 100
     })
 
+    it("does NOT re-award completion XP after un-completing and re-completing", async () => {
+      const course = await createCourse(10)
+      await POST(makePost("/api/progress/course", { action: "update", id: course.id, completedLessons: 10 }))
+      await POST(makePost("/api/progress/course", { action: "update", id: course.id, completedLessons: 3 }))
+      await POST(makePost("/api/progress/course", { action: "update", id: course.id, completedLessons: 10 }))
+      const user = await prisma.user.findUnique({ where: { id: ID } })
+      expect(user!.totalXP).toBe(50) // Not 100
+    })
+
     it("returns 404 when course id does not exist", async () => {
       const res = await POST(makePost("/api/progress/course", { action: "update", id: "nonexistent-id", completedLessons: 5 }))
       expect(res.status).toBe(404)
@@ -88,6 +97,32 @@ describe("POST /api/progress/course", () => {
       expect(res.status).toBe(200)
       const deleted = await prisma.externalCourse.findUnique({ where: { id: course.id } })
       expect(deleted).toBeNull()
+    })
+
+    it("revokes the XP the course earned when it is deleted", async () => {
+      const created = await POST(makePost("/api/progress/course", {
+        action: "create", title: "Farm Me", platform: "Test", totalLessons: 1,
+      }))
+      const { course } = await created.json()
+      await POST(makePost("/api/progress/course", { action: "update", id: course.id, completedLessons: 1 }))
+      const before = await prisma.user.findUnique({ where: { id: ID } })
+      expect(before!.totalXP).toBeGreaterThanOrEqual(60) // 10 (add) + 50 (complete) + any achievements
+
+      const res = await POST(makePost("/api/progress/course", { action: "delete", id: course.id }))
+      expect(res.status).toBe(200)
+      const after = await prisma.user.findUnique({ where: { id: ID } })
+      expect(after!.totalXP).toBe(before!.totalXP - 60)
+    })
+
+    it("never drops totalXP below zero when revoking", async () => {
+      const course = await prisma.externalCourse.create({
+        data: { userId: ID, title: "Imported", platform: "Test", xpEarned: 500 },
+      })
+      await prisma.user.update({ where: { id: ID }, data: { totalXP: 100, level: 1 } })
+      await POST(makePost("/api/progress/course", { action: "delete", id: course.id }))
+      const user = await prisma.user.findUnique({ where: { id: ID } })
+      expect(user!.totalXP).toBe(0)
+      expect(user!.level).toBe(1)
     })
 
     it("returns 404 when trying to delete a non-existent course", async () => {

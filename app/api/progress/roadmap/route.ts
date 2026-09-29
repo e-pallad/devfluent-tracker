@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getCurrentUser, awardXP } from "@/lib/user"
+import { getCurrentUser, awardXP, lockUser } from "@/lib/user"
 import { isDemoUser } from "@/lib/demo"
 import { XP_VALUES } from "@/lib/xp"
+import { AVAILABLE_ROADMAPS, getRoadmapSections, getAllTrackableNodes } from "@/lib/roadmap"
 
 export async function POST(req: NextRequest) {
   const user = await getCurrentUser()
@@ -37,15 +38,31 @@ export async function POST(req: NextRequest) {
   if (nodeType && !validNodeTypes.includes(nodeType)) {
     return NextResponse.json({ error: `Invalid nodeType. Must be one of: ${validNodeTypes.join(", ")}` }, { status: 400 })
   }
-  const safeNodeType = nodeType && validNodeTypes.includes(nodeType) ? nodeType : "subtopic"
+
+  if (!AVAILABLE_ROADMAPS.some((r) => r.id === roadmapId)) {
+    return NextResponse.json({ error: "Roadmap not found" }, { status: 404 })
+  }
+
+  // Resolve the node from the roadmap source so XP can only be earned for real
+  // nodes, and the node type (topic vs subtopic XP) can't be chosen by the client.
+  const nodes = getAllTrackableNodes(await getRoadmapSections(roadmapId))
+  if (nodes.length === 0) {
+    return NextResponse.json({ error: "Roadmap data unavailable. Try again later." }, { status: 503 })
+  }
+  const node = nodes.find((n) => n.id === nodeId)
+  if (!node) {
+    return NextResponse.json({ error: "Roadmap node not found" }, { status: 404 })
+  }
 
   const { record } = await prisma.$transaction(async (tx) => {
+    await lockUser(tx, user.id)
+
     const existing = await tx.roadmapProgress.findUnique({
       where: { userId_roadmapId_nodeId: { userId: user.id, roadmapId, nodeId } },
     })
-    const wasCompleted = existing?.status === "COMPLETED"
-    // Use the stored nodeType on updates to prevent XP manipulation via re-submission
-    const resolvedNodeType = existing?.nodeType ?? safeNodeType
+    // completedAt marks the first completion and is never cleared, so cycling a
+    // node's status (the UI click-cycles through all four) can't re-award XP.
+    const firstCompletion = status === "COMPLETED" && !existing?.completedAt
 
     const record = await tx.roadmapProgress.upsert({
       where: { userId_roadmapId_nodeId: { userId: user.id, roadmapId, nodeId } },
@@ -53,20 +70,21 @@ export async function POST(req: NextRequest) {
         userId: user.id,
         roadmapId,
         nodeId,
-        nodeLabel: nodeLabel ?? nodeId,
-        nodeType: safeNodeType,
+        nodeLabel: node.label,
+        nodeType: node.type,
         status,
-        completedAt: status === "COMPLETED" ? new Date() : null,
+        completedAt: firstCompletion ? new Date() : null,
       },
       update: {
         status,
-        completedAt: status === "COMPLETED" ? new Date() : null,
-        nodeLabel: nodeLabel ?? undefined,
+        nodeLabel: node.label,
+        nodeType: node.type,
+        ...(firstCompletion ? { completedAt: new Date() } : {}),
       },
     })
 
-    if (status === "COMPLETED" && !wasCompleted) {
-      const xp = resolvedNodeType === "topic" ? XP_VALUES.ROADMAP_TOPIC : XP_VALUES.ROADMAP_SUBTOPIC
+    if (firstCompletion) {
+      const xp = node.type === "topic" ? XP_VALUES.ROADMAP_TOPIC : XP_VALUES.ROADMAP_SUBTOPIC
       await awardXP(user.id, xp, { db: tx })
     }
 

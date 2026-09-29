@@ -56,6 +56,16 @@ describe("POST /api/progress/project", () => {
     expect(user!.totalXP).toBe(150)
   })
 
+  it("does NOT re-award XP for complete → start → complete", async () => {
+    await POST(makePost("/api/progress/project", { action: "complete", month: 1 }))
+    const start = await POST(makePost("/api/progress/project", { action: "start", month: 1 }))
+    expect((await start.json()).project.status).toBe("COMPLETED") // not reopened
+    await POST(makePost("/api/progress/project", { action: "complete", month: 1 }))
+
+    const user = await prisma.user.findUnique({ where: { id: ID } })
+    expect(user!.totalXP).toBe(150)
+  })
+
   it("stores repoUrl and liveUrl on completion", async () => {
     const res = await POST(makePost("/api/progress/project", {
       action: "complete", month: 1,

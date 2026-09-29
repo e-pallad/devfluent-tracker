@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getCurrentUser, awardXP } from "@/lib/user"
+import { getCurrentUser, awardXP, lockUser } from "@/lib/user"
 import { decryptToken } from "@/lib/encryption"
 import { XP_VALUES } from "@/lib/xp"
 
@@ -95,9 +95,13 @@ export async function POST() {
     const toCreate = relevant.filter((r) => !knownEventIds.has(r.event.id))
 
     if (toCreate.length > 0) {
-      const { totalXPAwarded: txnXP } = await prisma.$transaction(async (tx) => {
-        // Create the records; skipDuplicates prevents errors if concurrent request already created them
-        await tx.githubEvent.createMany({
+      const { totalXPAwarded: txnXP, createdCount } = await prisma.$transaction(async (tx) => {
+        // Serialize concurrent syncs for this user (daily-cap check below reads then awards)
+        await lockUser(tx, user.id)
+
+        // skipDuplicates prevents errors if a concurrent request already created some
+        // of them; createManyAndReturn returns only the rows this call inserted.
+        const createdEvents = await tx.githubEvent.createManyAndReturn({
           data: toCreate.map((r) => ({
             userId: user.id,
             eventId: r.event.id,
@@ -106,15 +110,6 @@ export async function POST() {
             occurredAt: r.occurredAt,
           })),
           skipDuplicates: true,
-        })
-
-        // Query back to see which events were actually created in this transaction
-        // by checking which ones are now in the database
-        const createdEvents = await tx.githubEvent.findMany({
-          where: {
-            userId: user.id,
-            eventId: { in: toCreate.map((r) => r.event.id) },
-          },
           select: { eventId: true },
         })
         const createdEventIds = new Set(createdEvents.map((e) => e.eventId))
@@ -131,8 +126,9 @@ export async function POST() {
           where: {
             userId: user.id,
             createdAt: { gte: todayStart },
-            // Exclude events we just created (they're in the DB but we're inside the transaction)
-            eventId: { notIn: toCreate.map((r) => r.event.id) },
+            // Exclude only the events this call just created; ones a concurrent sync
+            // inserted already count toward today's cap
+            eventId: { notIn: [...createdEventIds] },
           },
           select: { xpAwarded: true },
         })
@@ -146,11 +142,11 @@ export async function POST() {
           await awardXP(user.id, actualXP, { db: tx })
         }
 
-        return { totalXPAwarded: actualXP }
+        return { totalXPAwarded: actualXP, createdCount: createdEvents.length }
       })
 
       totalXPAwarded = txnXP
-      newEvents = toCreate.length
+      newEvents = createdCount
     }
   }
 

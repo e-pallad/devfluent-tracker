@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getCurrentUser, awardXP, updateStreak, checkAchievements } from "@/lib/user"
+import { getCurrentUser, awardXP, lockUser, updateStreak, checkAchievements } from "@/lib/user"
 import { getBlock } from "@/content/curriculum"
 import { XP_VALUES } from "@/lib/xp"
 import { isDemoUser } from "@/lib/demo"
@@ -36,17 +36,21 @@ export async function POST(req: NextRequest) {
 
   const isCompleting = status === "COMPLETED"
   const isSkipping = status === "SKIPPED"
+  const completionXP = usedTimer ? XP_VALUES.COMPLETE_BLOCK_POMODORO : XP_VALUES.COMPLETE_BLOCK
 
-  const xpToAward = isCompleting
-    ? usedTimer ? XP_VALUES.COMPLETE_BLOCK_POMODORO : XP_VALUES.COMPLETE_BLOCK
-    : isSkipping ? XP_VALUES.SKIP_BLOCK : 0
+  // Lock + check + upsert + XP award in one transaction so concurrent requests can't double-award
+  const { record, firstCompletion, xpAwarded, leveledUp, newLevel, newXP } = await prisma.$transaction(async (tx) => {
+    await lockUser(tx, user.id)
 
-  // Wrap check + upsert + XP award in a transaction to prevent double-XP under concurrent requests
-  const { record, alreadyCompleted, leveledUp, newLevel, newXP } = await prisma.$transaction(async (tx) => {
     const existing = await tx.blockProgress.findUnique({
       where: { userId_blockId: { userId: user.id, blockId } },
     })
-    const alreadyCompleted = existing?.status === "COMPLETED"
+    // completedAt is set on the first completion and never cleared, so it marks
+    // "completion XP already paid" even if the block was later skipped/reopened.
+    const firstCompletion = isCompleting && !existing?.completedAt
+    // Skip XP is a one-time nudge for blocks that never earned anything
+    const firstSkip = isSkipping && !existing?.completedAt && (existing?.xpEarned ?? 0) === 0
+    const xpAwarded = firstCompletion ? completionXP : firstSkip ? XP_VALUES.SKIP_BLOCK : 0
 
     const record = await tx.blockProgress.upsert({
       where: { userId_blockId: { userId: user.id, blockId } },
@@ -57,14 +61,14 @@ export async function POST(req: NextRequest) {
         week,
         status,
         minutesSpent: safeMinutes,
-        xpEarned: xpToAward,
+        xpEarned: xpAwarded,
         completedAt: isCompleting ? new Date() : null,
       },
       update: {
         status,
         minutesSpent: { increment: safeMinutes },
-        completedAt: isCompleting ? new Date() : undefined,
-        ...(xpToAward > 0 && !alreadyCompleted ? { xpEarned: xpToAward } : {}),
+        ...(firstCompletion ? { completedAt: new Date() } : {}),
+        ...(xpAwarded > 0 ? { xpEarned: { increment: xpAwarded } } : {}),
       },
     })
 
@@ -72,15 +76,16 @@ export async function POST(req: NextRequest) {
     let newLevel = user.level
     let newXP = user.totalXP
 
-    if (xpToAward > 0 && !alreadyCompleted) {
-      const result = await awardXP(user.id, xpToAward, { db: tx })
+    if (xpAwarded > 0) {
+      const result = await awardXP(user.id, xpAwarded, { db: tx })
       leveledUp = result.leveledUp
       newLevel = result.newLevel
       newXP = result.newXP
     }
 
-    // Increment blocksCompleted in DailyLog for today when completing a block
-    if (isCompleting && !alreadyCompleted) {
+    // Increment blocksCompleted in DailyLog for today — first completion only, so
+    // toggling a block can't inflate the daily/weekly goal bars
+    if (firstCompletion) {
       const today = new Date()
       today.setHours(0, 0, 0, 0)
       await tx.dailyLog.upsert({
@@ -90,16 +95,16 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    return { record, alreadyCompleted, leveledUp, newLevel, newXP }
+    return { record, firstCompletion, xpAwarded, leveledUp, newLevel, newXP }
   })
 
   let newAchievements: Awaited<ReturnType<typeof checkAchievements>> = []
-  if (isCompleting && !alreadyCompleted) {
+  if (firstCompletion) {
     await updateStreak(user.id)
     newAchievements = await checkAchievements(user.id)
   }
 
-  return NextResponse.json({ success: true, record, leveledUp, newLevel, newXP, xpAwarded: alreadyCompleted ? 0 : xpToAward, achievements: newAchievements })
+  return NextResponse.json({ success: true, record, leveledUp, newLevel, newXP, xpAwarded, achievements: newAchievements })
 }
 
 export async function PATCH(req: NextRequest) {

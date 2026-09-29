@@ -153,6 +153,18 @@ describe("GitHub sync routes", () => {
       expect(user!.totalXP).toBe(5) // only from first sync
     })
 
+    it("does not double-award XP when two syncs run concurrently", async () => {
+      await connectGithub()
+      stubFetch([makeEvent("push-race-1", "PushEvent"), makeEvent("push-race-2", "PushEvent")])
+
+      const bodies = await Promise.all([POST(), POST()].map(async (p) => (await p).json()))
+      expect(bodies.reduce((sum, b) => sum + b.totalXPAwarded, 0)).toBe(10)
+      expect(bodies.reduce((sum, b) => sum + b.newEvents, 0)).toBe(2)
+
+      const user = await prisma.user.findUnique({ where: { id: ID } })
+      expect(user!.totalXP).toBe(10)
+    })
+
     it("creates a GithubEvent record for each new event", async () => {
       await connectGithub()
       stubFetch([makeEvent("push-rec-1", "PushEvent")])

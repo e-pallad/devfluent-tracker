@@ -205,6 +205,47 @@ describe("POST /api/progress/quiz", () => {
     expect(user!.totalXP).toBe(75) // 40 (quiz) + 10 (first-quiz) + 25 (perfect-score)
   })
 
+  // --- One-time XP per quiz ---
+
+  it("awards no XP when retaking a quiz with the same result", async () => {
+    await POST(makePost("/api/progress/quiz", { blockId: BLOCK, score: 100 }))
+    const res = await POST(makePost("/api/progress/quiz", { blockId: BLOCK, score: 100 }))
+    const body = await res.json()
+    expect(body.xpEarned).toBe(0)
+    expect(body.passed).toBe(true)
+    expect(body.perfect).toBe(true)
+
+    // Retake is still recorded, with the XP it actually earned
+    const attempts = await prisma.quizAttempt.findMany({
+      where: { userId: ID, blockId: BLOCK },
+      orderBy: { attemptedAt: "asc" },
+    })
+    expect(attempts).toHaveLength(2)
+    expect(attempts[1].xpEarned).toBe(0)
+  })
+
+  it("awards only the pass bonus when passing after a failed attempt", async () => {
+    await POST(makePost("/api/progress/quiz", { blockId: BLOCK, score: 40 }))
+    const res = await POST(makePost("/api/progress/quiz", { blockId: BLOCK, score: 80 }))
+    const body = await res.json()
+    expect(body.xpEarned).toBe(12) // QUIZ_PASS only — QUIZ_TRY was paid on the first attempt
+  })
+
+  it("awards only the perfect bonus when a perfect score follows a pass", async () => {
+    await POST(makePost("/api/progress/quiz", { blockId: BLOCK, score: 80 }))
+    const res = await POST(makePost("/api/progress/quiz", { blockId: BLOCK, score: 100 }))
+    const body = await res.json()
+    expect(body.xpEarned).toBe(25) // QUIZ_PERFECT only
+  })
+
+  it("does not unlock 'quiz-master' by passing the same quiz five times", async () => {
+    for (let i = 0; i < 5; i++) {
+      await POST(makePost("/api/progress/quiz", { blockId: BLOCK, score: 80 }))
+    }
+    const achievement = await prisma.achievement.findFirst({ where: { userId: ID, slug: "quiz-master" } })
+    expect(achievement).toBeNull()
+  })
+
   // --- Response shape ---
 
   it("returns expected response fields on a successful submission", async () => {
