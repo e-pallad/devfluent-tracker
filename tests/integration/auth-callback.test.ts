@@ -66,9 +66,17 @@ function stubNonGitHubToken() {
   )
 }
 
-/** Allow fire-and-forget async operations in the route to complete before asserting DB state */
-async function flushFireAndForget() {
-  await new Promise(resolve => setTimeout(resolve, 50))
+/**
+ * The route persists GitHub credentials fire-and-forget, after the response is
+ * returned. Poll for the row instead of sleeping a fixed time — under a loaded
+ * CI runner a fixed 50 ms wait was not always enough.
+ */
+async function waitForGithubCredentials(userId: string) {
+  return vi.waitFor(async () => {
+    const user = await prisma.user.findUnique({ where: { id: userId } })
+    if (!user?.githubAccessToken) throw new Error("GitHub credentials not persisted yet")
+    return user
+  }, { timeout: 5000, interval: 20 })
 }
 
 describe("GET /api/auth/callback", () => {
@@ -153,10 +161,9 @@ describe("GET /api/auth/callback", () => {
       }) as unknown as ReturnType<typeof createCallbackClient>
     )
     await GET(makeGET("valid-code"))
-    await flushFireAndForget()
-    const user = await prisma.user.findUnique({ where: { id: ID } })
-    expect(user!.githubAccessToken).toBe("gh-token-signup")
-    expect(user!.githubUsername).toBe("octocat")
+    const user = await waitForGithubCredentials(ID)
+    expect(user.githubAccessToken).toBe("gh-token-signup")
+    expect(user.githubUsername).toBe("octocat")
   })
 
   it("upserts credentials for email user who linked GitHub (GitHub API confirms token)", async () => {
@@ -167,10 +174,9 @@ describe("GET /api/auth/callback", () => {
       }) as unknown as ReturnType<typeof createCallbackClient>
     )
     await GET(makeGET("valid-code"))
-    await flushFireAndForget()
-    const user = await prisma.user.findUnique({ where: { id: ID } })
-    expect(user!.githubAccessToken).toBe("gh-token-linked")
-    expect(user!.githubUsername).toBe("octocat-linked")
+    const user = await waitForGithubCredentials(ID)
+    expect(user.githubAccessToken).toBe("gh-token-linked")
+    expect(user.githubUsername).toBe("octocat-linked")
   })
 
   it("creates a new User row on first-ever GitHub login (upsert create path)", async () => {
@@ -185,11 +191,9 @@ describe("GET /api/auth/callback", () => {
         }) as unknown as ReturnType<typeof createCallbackClient>
       )
       await GET(makeGET("valid-code"))
-      await flushFireAndForget()
-      const user = await prisma.user.findUnique({ where: { id: NEW_ID } })
-      expect(user).not.toBeNull()
-      expect(user!.githubUsername).toBe("newdev")
-      expect(user!.githubAccessToken).toBe("gh-new-token")
+      const user = await waitForGithubCredentials(NEW_ID)
+      expect(user.githubUsername).toBe("newdev")
+      expect(user.githubAccessToken).toBe("gh-new-token")
     } finally {
       await prisma.user.deleteMany({ where: { id: NEW_ID } })
     }
