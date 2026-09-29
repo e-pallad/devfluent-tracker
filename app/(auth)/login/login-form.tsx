@@ -92,6 +92,9 @@ export function LoginForm({ next, error: authError }: LoginFormProps) {
     setLoading(true)
     setError(null)
     await fetch("/api/auth/demo", { method: "DELETE" })
+    // Full-page navigation is required: this route handler redirects to GitHub's
+    // OAuth page, which client-side router navigation cannot follow.
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination
     window.location.href = `/api/auth/github/login?next=${encodeURIComponent(validatedNext)}`
   }
 

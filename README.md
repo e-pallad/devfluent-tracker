@@ -5,7 +5,7 @@
 # Devfluent
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-purple?style=flat-square)](LICENSE)
-[![Next.js](https://img.shields.io/badge/Next.js-16.2-black?style=flat-square&logo=next.js)](https://nextjs.org)
+[![Next.js](https://img.shields.io/badge/Next.js-16.3-black?style=flat-square&logo=next.js)](https://nextjs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-blue?style=flat-square&logo=typescript)](https://www.typescriptlang.org)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind-v4-38bdf8?style=flat-square&logo=tailwindcss)](https://tailwindcss.com)
 [![Prisma](https://img.shields.io/badge/Prisma-7.6-2D3748?style=flat-square&logo=prisma)](https://prisma.io)
@@ -161,7 +161,7 @@ Similarly, `proxy.ts` replaces `middleware.ts` — Next.js 16 deprecated the mid
 
 | Layer | Technology |
 |---|---|
-| Framework | Next.js 16.2 (App Router, Turbopack) |
+| Framework | Next.js 16.3 (App Router, Turbopack) |
 | Language | TypeScript 5 |
 | Styling | Tailwind CSS v4 |
 | Database | Supabase PostgreSQL |
