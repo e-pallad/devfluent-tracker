@@ -8,7 +8,7 @@
 
 | Layer | Technology |
 |---|---|
-| Framework | Next.js 16.2.0 (Turbopack) |
+| Framework | Next.js 16.3.7 (Turbopack) |
 | Language | TypeScript |
 | Styling | Tailwind CSS v4 |
 | Database | Supabase PostgreSQL (project: `phigbihrgojcyebymwcw`, region: `eu-west-1`) |
