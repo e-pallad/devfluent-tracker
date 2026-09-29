@@ -20,6 +20,9 @@
  *
  * Stripe notes:
  *   - mode: "subscription" for monthly/annual, "payment" for lifetime
+ *   - payment mode sets customer_creation: "always" (Stripe otherwise leaves
+ *     session.customer null and the webhook cannot link the purchase)
+ *   - an existing stripeCustomerId is reused instead of creating a new customer
  *   - allow_promotion_codes: true — enables Stripe-hosted coupon input
  *   - success_url includes ?session_id={CHECKOUT_SESSION_ID} so we can
  *     display a thank-you message; actual activation is handled by the webhook.
@@ -29,6 +32,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { stripe } from "@/lib/stripe"
 import { getCurrentUser } from "@/lib/user"
 import { getUserTier } from "@/lib/subscription"
+import { prisma } from "@/lib/prisma"
 
 // Resolve which price IDs are valid for this environment.
 function validPriceIds(): { id: string; mode: "subscription" | "payment" }[] {
@@ -80,13 +84,28 @@ export async function POST(req: NextRequest) {
 
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"
 
+  // Reuse the Stripe customer from a previous (e.g. cancelled) subscription so
+  // returning users don't accumulate duplicate customers.
+  const existingSub = await prisma.subscription.findUnique({
+    where: { userId: user.id },
+    select: { stripeCustomerId: true },
+  })
+  const customerParams = existingSub?.stripeCustomerId
+    ? { customer: existingSub.stripeCustomerId }
+    : {
+        customer_email: user.email ?? undefined,
+        // Payment-mode sessions don't create a Customer unless asked to; the
+        // webhook and Customer Portal both need one for lifetime purchases.
+        ...(matched.mode === "payment" ? { customer_creation: "always" as const } : {}),
+      }
+
   try {
     const session = await stripe.checkout.sessions.create({
       mode: matched.mode,
       line_items: [{ price: priceId, quantity: 1 }],
       // Embed userId so the webhook can resolve the user without a customer lookup
       metadata: { userId: user.id },
-      customer_email: user.email ?? undefined,
+      ...customerParams,
       allow_promotion_codes: true,
       success_url: `${appUrl}/settings/upgrade/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${appUrl}/settings/upgrade`,

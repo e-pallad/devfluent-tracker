@@ -9,6 +9,10 @@
  *   customer.subscription.deleted   → mark CANCELLED, clear period
  *   invoice.payment_failed          → mark PAST_DUE
  *
+ * User.subscriptionTier always mirrors the *effective* tier (FREE while a PRO
+ * subscription is past due or cancelled). LIFETIME rows are never downgraded
+ * by subscription events.
+ *
  * All DB writes are wrapped in prisma.$transaction.
  * Stripe signature is verified before any processing.
  * Returns 200 immediately for unhandled event types (Stripe retries on non-2xx).
@@ -59,6 +63,32 @@ function mapPriceTier(priceId: string): "PRO" | "LIFETIME" | "FREE" {
   if (lifetime && priceId === lifetime) return "LIFETIME"
   if ((monthly && priceId === monthly) || (annual && priceId === annual)) return "PRO"
   return "FREE"
+}
+
+/**
+ * Tier the user should actually have right now. LIFETIME never lapses; PRO only
+ * counts while Stripe considers the subscription active. Mirrored onto
+ * User.subscriptionTier so the fallback path never grants a lapsed plan.
+ */
+function effectiveTier(
+  tier: "PRO" | "LIFETIME" | "FREE",
+  status: "ACTIVE" | "CANCELLED" | "PAST_DUE" | "TRIALING"
+): "PRO" | "LIFETIME" | "FREE" {
+  if (tier === "LIFETIME") return "LIFETIME"
+  if (tier === "PRO" && (status === "ACTIVE" || status === "TRIALING")) return "PRO"
+  return "FREE"
+}
+
+/**
+ * Current billing period end. Since API version 2025-03-31.basil the field lives
+ * on subscription items rather than the subscription itself; the top-level
+ * field is kept as a fallback for older payloads. Never returns an Invalid Date.
+ */
+function getPeriodEnd(sub: Stripe.Subscription): Date | null {
+  const itemEnd = sub.items?.data?.[0]?.current_period_end
+  const legacyEnd = (sub as unknown as { current_period_end?: number }).current_period_end
+  const seconds = typeof itemEnd === "number" ? itemEnd : legacyEnd
+  return typeof seconds === "number" && Number.isFinite(seconds) ? new Date(seconds * 1000) : null
 }
 
 /**
@@ -116,7 +146,7 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
   const customerId =
     typeof session.customer === "string" ? session.customer : session.customer?.id
 
-  if (!customerId || !stripe) return
+  if (!stripe) return
 
   if (session.mode === "payment") {
     // Lifetime purchase — no subscription object. Retrieve line items to get the price ID.
@@ -139,7 +169,8 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
           userId,
           tier: "LIFETIME",
           status: "ACTIVE",
-          stripeCustomerId: customerId,
+          // Null only for sessions created before customer_creation: "always"
+          stripeCustomerId: customerId ?? null,
           // No stripeSubId for one-time payments
           currentPeriodEnd: null,
           cancelAtPeriodEnd: false,
@@ -147,7 +178,7 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
         update: {
           tier: "LIFETIME",
           status: "ACTIVE",
-          stripeCustomerId: customerId,
+          ...(customerId ? { stripeCustomerId: customerId } : {}),
           currentPeriodEnd: null,
           cancelAtPeriodEnd: false,
         },
@@ -165,7 +196,10 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
     return
   }
 
-  // subscription mode — retrieve the full Subscription object for price/period details
+  // subscription mode — a Customer is always created by Checkout
+  if (!customerId) return
+
+  // Retrieve the full Subscription object for price/period details
   const subscriptionId =
     typeof session.subscription === "string"
       ? session.subscription
@@ -181,8 +215,7 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
   const priceId = sub.items.data[0]?.price?.id ?? ""
   const tier = mapPriceTier(priceId)
   const status = mapStripeStatus(sub.status)
-  const currentPeriodEnd =
-    tier === "LIFETIME" ? null : new Date((sub as unknown as { current_period_end: number }).current_period_end * 1000)
+  const currentPeriodEnd = tier === "LIFETIME" ? null : getPeriodEnd(sub)
 
   await prisma.$transaction(async (tx) => {
     await tx.subscription.upsert({
@@ -208,7 +241,7 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
     // Mirror onto User.subscriptionTier for the fallback lookup path
     await tx.user.update({
       where: { id: userId },
-      data: { subscriptionTier: tier },
+      data: { subscriptionTier: effectiveTier(tier, status) },
     })
   })
 
@@ -230,7 +263,9 @@ async function handleSubscriptionUpdated(sub: Stripe.Subscription) {
   const customerId =
     typeof sub.customer === "string" ? sub.customer : sub.customer.id
 
-  const userId = await resolveUserId(customerId)
+  // metadata.userId is set via subscription_data at checkout, so this also
+  // works when the event arrives before checkout.session.completed.
+  const userId = await resolveUserId(customerId, sub.metadata)
   if (!userId) {
     console.warn("[stripe/webhook] subscription.updated: no userId found for customer", {
       customerId,
@@ -239,18 +274,37 @@ async function handleSubscriptionUpdated(sub: Stripe.Subscription) {
     return
   }
 
+  const existing = await prisma.subscription.findUnique({
+    where: { userId },
+    select: { tier: true, stripeSubId: true },
+  })
+  if (existing?.tier === "LIFETIME") return
+  if (existing?.stripeSubId && existing.stripeSubId !== sub.id) {
+    console.warn("[stripe/webhook] subscription.updated: ignoring event for superseded subscription", {
+      userId,
+      subId: sub.id,
+    })
+    return
+  }
+
   const priceId = sub.items.data[0]?.price?.id ?? ""
   const tier = mapPriceTier(priceId)
   const status = mapStripeStatus(sub.status)
-  const currentPeriodEnd =
-    tier === "LIFETIME"
-      ? null
-      : new Date((sub as unknown as { current_period_end: number }).current_period_end * 1000)
+  const currentPeriodEnd = tier === "LIFETIME" ? null : getPeriodEnd(sub)
 
   await prisma.$transaction(async (tx) => {
-    await tx.subscription.update({
+    await tx.subscription.upsert({
       where: { userId },
-      data: {
+      create: {
+        userId,
+        tier,
+        status,
+        stripeCustomerId: customerId,
+        stripeSubId: sub.id,
+        currentPeriodEnd,
+        cancelAtPeriodEnd: sub.cancel_at_period_end,
+      },
+      update: {
         tier,
         status,
         stripeSubId: sub.id,
@@ -260,7 +314,7 @@ async function handleSubscriptionUpdated(sub: Stripe.Subscription) {
     })
     await tx.user.update({
       where: { id: userId },
-      data: { subscriptionTier: tier },
+      data: { subscriptionTier: effectiveTier(tier, status) },
     })
   })
 
@@ -290,6 +344,15 @@ async function handleSubscriptionDeleted(sub: Stripe.Subscription) {
     })
     return
   }
+
+  const existing = await prisma.subscription.findUnique({
+    where: { userId },
+    select: { tier: true, stripeSubId: true },
+  })
+  // A lifetime purchase outlives any old subscription; a stale event for a
+  // replaced subscription must not cancel the current one.
+  if (!existing || existing.tier === "LIFETIME") return
+  if (existing.stripeSubId && existing.stripeSubId !== sub.id) return
 
   await prisma.$transaction(async (tx) => {
     await tx.subscription.update({
@@ -331,9 +394,17 @@ async function handlePaymentFailed(invoice: Stripe.Invoice) {
     return
   }
 
-  await prisma.subscription.update({
-    where: { userId },
-    data: { status: "PAST_DUE" },
+  await prisma.$transaction(async (tx) => {
+    const { count } = await tx.subscription.updateMany({
+      where: { userId, tier: { not: "LIFETIME" } },
+      data: { status: "PAST_DUE" },
+    })
+    if (count > 0) {
+      await tx.user.update({
+        where: { id: userId },
+        data: { subscriptionTier: "FREE" },
+      })
+    }
   })
 
   console.info("[stripe/webhook] invoice.payment_failed: marked PAST_DUE", { userId })

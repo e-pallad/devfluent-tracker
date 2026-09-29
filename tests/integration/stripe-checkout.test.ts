@@ -147,6 +147,33 @@ describe("POST /api/stripe/checkout", () => {
     const call = mockSessionCreate.mock.calls[0][0]
     expect(call.mode).toBe("payment")
     expect(call.line_items[0].price).toBe(TEST_PRICE_LIFETIME)
+    // Without this, payment-mode sessions have no customer and the webhook can't link them
+    expect(call.customer_creation).toBe("always")
+    expect(call.customer_email).toBe(`${ID}@test.devfluent`)
+  })
+
+  it("does not set customer_creation for subscription-mode sessions", async () => {
+    mockSessionCreate.mockResolvedValueOnce({ url: "https://checkout.stripe.com/session_monthly" })
+
+    await POST(makeCheckoutRequest({ priceId: TEST_PRICE_MONTHLY }))
+
+    const call = mockSessionCreate.mock.calls[0][0]
+    expect(call.customer_creation).toBeUndefined()
+  })
+
+  it("reuses the existing Stripe customer of a lapsed subscription", async () => {
+    await prisma.subscription.create({
+      data: { userId: ID, tier: "PRO", status: "CANCELLED", stripeCustomerId: "cus_returning" },
+    })
+    mockSessionCreate.mockResolvedValueOnce({ url: "https://checkout.stripe.com/session_lifetime" })
+
+    const res = await POST(makeCheckoutRequest({ priceId: TEST_PRICE_LIFETIME }))
+    expect(res.status).toBe(200)
+
+    const call = mockSessionCreate.mock.calls[0][0]
+    expect(call.customer).toBe("cus_returning")
+    expect(call.customer_email).toBeUndefined()
+    expect(call.customer_creation).toBeUndefined()
   })
 
   it("returns 500 when Stripe session create throws", async () => {
