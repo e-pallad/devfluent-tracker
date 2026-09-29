@@ -79,13 +79,15 @@ function makeStripeSub(
     cancelAtPeriodEnd = false,
   } = opts
 
+  // Since API version 2025-03-31.basil the billing period lives on the
+  // subscription item, not on the subscription itself.
   return {
     id,
     status,
     cancel_at_period_end: cancelAtPeriodEnd,
-    current_period_end: periodEnd,
-    items: { data: [{ price: { id: priceId } }] },
+    items: { data: [{ price: { id: priceId }, current_period_end: periodEnd }] },
     customer: CUSTOMER_ID,
+    metadata: {},
   }
 }
 
@@ -173,6 +175,24 @@ describe("POST /api/webhooks/stripe", () => {
     expect(user!.subscriptionTier).toBe("PRO")
   })
 
+  it("checkout.session.completed: stores currentPeriodEnd from the subscription item", async () => {
+    const periodEnd = Math.floor(Date.now() / 1000) + 30 * 24 * 3600
+    mockRetrieve.mockResolvedValueOnce(makeStripeSub({ periodEnd }))
+
+    mockEvent("checkout.session.completed", {
+      mode: "subscription",
+      metadata: { userId: ID },
+      customer: CUSTOMER_ID,
+      subscription: SUB_ID,
+    })
+
+    const res = await POST(makeRequest("{}"))
+    expect(res.status).toBe(200)
+
+    const sub = await prisma.subscription.findUnique({ where: { userId: ID } })
+    expect(sub!.currentPeriodEnd!.getTime()).toBe(periodEnd * 1000)
+  })
+
   it("checkout.session.completed: skips modes other than subscription/payment", async () => {
     mockEvent("checkout.session.completed", {
       mode: "setup",
@@ -210,6 +230,29 @@ describe("POST /api/webhooks/stripe", () => {
     expect(sub!.stripeCustomerId).toBe(CUSTOMER_ID)
     expect(sub!.stripeSubId).toBeNull() // no subscription for one-time payment
     expect(sub!.currentPeriodEnd).toBeNull() // lifetime has no expiry
+
+    const user = await prisma.user.findUnique({ where: { id: ID } })
+    expect(user!.subscriptionTier).toBe("LIFETIME")
+  })
+
+  it("checkout.session.completed: activates LIFETIME even when the session has no customer", async () => {
+    mockListLineItems.mockResolvedValueOnce({
+      data: [{ price: { id: TEST_PRICE_LIFETIME } }],
+    })
+
+    mockEvent("checkout.session.completed", {
+      mode: "payment",
+      metadata: { userId: ID },
+      customer: null,
+      subscription: null,
+    })
+
+    const res = await POST(makeRequest("{}"))
+    expect(res.status).toBe(200)
+
+    const sub = await prisma.subscription.findUnique({ where: { userId: ID } })
+    expect(sub!.tier).toBe("LIFETIME")
+    expect(sub!.stripeCustomerId).toBeNull()
 
     const user = await prisma.user.findUnique({ where: { id: ID } })
     expect(user!.subscriptionTier).toBe("LIFETIME")
@@ -289,9 +332,73 @@ describe("POST /api/webhooks/stripe", () => {
     // PAST_DUE still retains existing tier (downgrade only on deletion)
     expect(sub!.tier).toBe("PRO")
 
-    // User subscriptionTier also reflects degraded state (mapPriceTier → PRO for same price)
+    // User subscriptionTier mirrors the effective tier — no Pro while past due
+    const user = await prisma.user.findUnique({ where: { id: ID } })
+    expect(user!.subscriptionTier).toBe("FREE")
+  })
+
+  it("subscription.updated: creates the row when it arrives before checkout.session.completed", async () => {
+    mockEvent("customer.subscription.updated", {
+      ...makeStripeSub(),
+      customer: CUSTOMER_ID,
+      metadata: { userId: ID },
+    })
+
+    const res = await POST(makeRequest("{}"))
+    expect(res.status).toBe(200)
+
+    const sub = await prisma.subscription.findUnique({ where: { userId: ID } })
+    expect(sub!.tier).toBe("PRO")
+    expect(sub!.status).toBe("ACTIVE")
+    expect(sub!.stripeCustomerId).toBe(CUSTOMER_ID)
+    expect(sub!.stripeSubId).toBe(SUB_ID)
+
     const user = await prisma.user.findUnique({ where: { id: ID } })
     expect(user!.subscriptionTier).toBe("PRO")
+  })
+
+  it("subscription.updated: never downgrades a LIFETIME row", async () => {
+    await prisma.subscription.create({
+      data: { userId: ID, tier: "LIFETIME", status: "ACTIVE", stripeCustomerId: CUSTOMER_ID },
+    })
+    await prisma.user.update({ where: { id: ID }, data: { subscriptionTier: "LIFETIME" } })
+
+    mockEvent("customer.subscription.updated", {
+      ...makeStripeSub({ status: "canceled" }),
+      customer: CUSTOMER_ID,
+    })
+
+    const res = await POST(makeRequest("{}"))
+    expect(res.status).toBe(200)
+
+    const sub = await prisma.subscription.findUnique({ where: { userId: ID } })
+    expect(sub!.tier).toBe("LIFETIME")
+    expect(sub!.status).toBe("ACTIVE")
+    const user = await prisma.user.findUnique({ where: { id: ID } })
+    expect(user!.subscriptionTier).toBe("LIFETIME")
+  })
+
+  it("subscription.updated: ignores events for a superseded subscription", async () => {
+    await prisma.subscription.create({
+      data: {
+        userId: ID,
+        tier: "PRO",
+        status: "ACTIVE",
+        stripeCustomerId: CUSTOMER_ID,
+        stripeSubId: "sub_current",
+      },
+    })
+
+    mockEvent("customer.subscription.updated", {
+      ...makeStripeSub({ id: "sub_old", status: "canceled" }),
+      customer: CUSTOMER_ID,
+    })
+
+    await POST(makeRequest("{}"))
+
+    const sub = await prisma.subscription.findUnique({ where: { userId: ID } })
+    expect(sub!.stripeSubId).toBe("sub_current")
+    expect(sub!.status).toBe("ACTIVE")
   })
 
   it("subscription.updated: returns 200 without error when no Subscription row found", async () => {
@@ -385,6 +492,21 @@ describe("POST /api/webhooks/stripe", () => {
 
     const sub = await prisma.subscription.findUnique({ where: { userId: ID } })
     expect(sub!.status).toBe("PAST_DUE")
+    const user = await prisma.user.findUnique({ where: { id: ID } })
+    expect(user!.subscriptionTier).toBe("FREE")
+  })
+
+  it("invoice.payment_failed: leaves a LIFETIME row untouched", async () => {
+    await prisma.subscription.create({
+      data: { userId: ID, tier: "LIFETIME", status: "ACTIVE", stripeCustomerId: CUSTOMER_ID },
+    })
+
+    mockEvent("invoice.payment_failed", { id: "in_test_lifetime", customer: CUSTOMER_ID })
+
+    const res = await POST(makeRequest("{}"))
+    expect(res.status).toBe(200)
+    const sub = await prisma.subscription.findUnique({ where: { userId: ID } })
+    expect(sub!.status).toBe("ACTIVE")
   })
 
   it("invoice.payment_failed: returns 200 when no customer on invoice", async () => {

@@ -82,6 +82,19 @@ describe("lib/subscription.ts — getUserTier", () => {
     expect(tier).toBe("PRO")
   })
 
+  it("returns FREE for a PAST_DUE subscription even if User.subscriptionTier says PRO", async () => {
+    await prisma.user.update({ where: { id: ID }, data: { subscriptionTier: "PRO" } })
+    await prisma.subscription.create({
+      data: {
+        userId: ID,
+        tier: "PRO",
+        status: "PAST_DUE",
+        currentPeriodEnd: new Date(Date.now() + 1000 * 60 * 60 * 24),
+      },
+    })
+    expect(await getUserTier(ID)).toBe("FREE")
+  })
+
   it("Subscription row takes precedence over User.subscriptionTier field", async () => {
     // User field says PRO but the actual subscription row is expired
     await prisma.user.update({ where: { id: ID }, data: { subscriptionTier: "PRO" } })
@@ -89,9 +102,9 @@ describe("lib/subscription.ts — getUserTier", () => {
     await prisma.subscription.create({
       data: { userId: ID, tier: "PRO", status: "ACTIVE", currentPeriodEnd: past },
     })
-    // Subscription row is expired → should fall through to User field which says PRO
-    // (Subscription row evaluation fails, so user field override applies)
+    // The Subscription row is authoritative — an expired row must not be
+    // rescued by a stale User.subscriptionTier value
     const tier = await getUserTier(ID)
-    expect(tier).toBe("PRO")
+    expect(tier).toBe("FREE")
   })
 })

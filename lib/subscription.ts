@@ -30,8 +30,10 @@ export interface FeatureFlags {
  * getUserTier — returns the effective subscription tier for a user.
  *
  * Resolution order:
- * 1. Active Subscription row (checks status + period end for monthly subs)
- * 2. User.subscriptionTier field (set by webhook or admin tooling)
+ * 1. Subscription row, if one exists — authoritative (checks status + period
+ *    end), so a lapsed or past-due subscription resolves to FREE
+ * 2. User.subscriptionTier field — only when no Subscription row exists
+ *    (manual admin overrides)
  * 3. Default: FREE
  */
 export async function getUserTier(userId: string): Promise<SubscriptionTier> {
@@ -55,9 +57,10 @@ export async function getUserTier(userId: string): Promise<SubscriptionTier> {
       !sub.currentPeriodEnd || sub.currentPeriodEnd > new Date()
 
     if (sub.tier === "PRO" && isActive && withinPeriod) return "PRO"
+    return "FREE"
   }
 
-  // Fall back to User.subscriptionTier (allows manual admin overrides)
+  // No Subscription row: fall back to User.subscriptionTier (manual admin overrides)
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: { subscriptionTier: true },
